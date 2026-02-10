@@ -19,22 +19,23 @@ models:
 license: Apache License 2.0
 ---
 
-# PowerAgent
+# Endless Context
 
-A lightweight Gradio chat agent with long-term memory powered by PowerMem, SeekDB, and OceanBase. Built to be ModelScope-friendly while staying easy to run locally.
+A lightweight Gradio chat agent with tape-first context management powered by Republic, SeekDB, and OceanBase. Built to be ModelScope-friendly while staying easy to run locally.
 
 ## What it is
 
-- Long-term chat memory with vector search (SeekDB + OceanBase)
-- Simple Gradio chat UI with streaming responses
+- Tape-first chat orchestration with Republic (append-only entries + handoff anchors)
+- SeekDB-backed persistent tape store via pyobvector dialect
+- Three-pane Gradio UI (Tape / Conversation / Anchors) with context-window indicator
 - Works out of the box on ModelScope Docker Studio via the included `Dockerfile`
-- Supports OpenAI, Qwen, and other LLM/embedding providers
+- Supports OpenAI, Qwen, and other any-llm compatible providers
 
 ## Run on ModelScope Docker Studio
 
 1) Keep the provided `Dockerfile` and `docker/entrypoint.sh` (they start SeekDB and the app).
 2) Exposed ports: `7860` (Gradio) and `2881` (SeekDB). Entry file is `app.py`.
-3) Set environment secrets in Studio, e.g. `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_PROVIDER`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, `DATABASE_PROVIDER=oceanbase`, plus `OCEANBASE_*` if overriding defaults.
+3) Set environment secrets in Studio, e.g. `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `OCEANBASE_HOST`, `OCEANBASE_PORT`, `OCEANBASE_USER`, `OCEANBASE_PASSWORD`, `OCEANBASE_DATABASE`, and optional `REPUBLIC_*` overrides.
 4) Build and run; open the forwarded `7860` port to use the chat UI.
 
 ## Run locally (preferred: Docker)
@@ -48,8 +49,8 @@ The UI is at `http://localhost:7860`. Stop with `make compose-down`.
 
 ### Single container
 ```bash
-docker build -t poweragent:latest .
-docker run --rm -p 7860:7860 -p 2881:2881 poweragent:latest
+docker build -t endless-context:latest .
+docker run --rm -p 7860:7860 -p 2881:2881 endless-context:latest
 ```
 
 ### Bare-metal (advanced, no containers)
@@ -69,6 +70,7 @@ Apache License 2.0
 
 ## Related
 
-- PowerMem: https://github.com/oceanbase/powermem
+- Republic: https://github.com/PsiACE/republic
+- pyobvector: https://github.com/oceanbase/pyobvector
 - SeekDB: https://www.oceanbase.ai/product/seekdb
 - OceanBase: https://www.oceanbase.com/

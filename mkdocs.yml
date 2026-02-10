@@ -1,10 +1,10 @@
-site_name: PowerAgent
-repo_url: https://github.com/PsiACE/poweragent
-site_url: https://psiace.github.io/poweragent
-site_description: A dead-simple Gradio chat agent backed by PowerMem.
+site_name: Endless Context
+repo_url: https://github.com/PsiACE/endless-context
+site_url: https://psiace.github.io/endless-context
+site_description: A tape-first Gradio chat agent backed by Republic and SeekDB.
 site_author: PsiACE
 edit_uri: edit/main/docs/
-repo_name: PsiACE/poweragent
+repo_name: PsiACE/endless-context
 
 nav:
   - Home: index.md
@@ -14,7 +14,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: ["src/poweragent"]
+          paths: ["src/endless_context"]
 
 theme:
   name: material

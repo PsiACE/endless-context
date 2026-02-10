@@ -63,6 +63,6 @@ compose-logs: ## Tail docker compose logs
 
 .PHONY: docker-build
 docker-build: ## Build a single-container image for ModelScope Docker Studio
-	@docker build -t poweragent:latest .
+	@docker build -t endless-context:latest .
 
 .DEFAULT_GOAL := help
