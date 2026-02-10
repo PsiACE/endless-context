@@ -1,0 +1,34 @@
+services:
+  seekdb:
+    image: quay.io/oceanbase/seekdb
+    container_name: seekdb
+    ports:
+      - "2881:2881"
+    build:
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple/}
+    environment:
+      ROOT_PASSWORD: ${SEEKDB_ROOT_PASSWORD:-}
+    volumes:
+      - seekdb-data:/var/lib/oceanbase
+
+  app:
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple/}
+    container_name: poweragent
+    ports:
+      - "7860:7860"
+    depends_on:
+      - seekdb
+    env_file:
+      - .env
+    environment:
+      OCEANBASE_HOST: seekdb
+      OCEANBASE_PORT: 2881
+      GRADIO_SERVER_NAME: 0.0.0.0
+      GRADIO_SERVER_PORT: 7860
+
+volumes:
+  seekdb-data:
