@@ -222,11 +222,18 @@ class SimpleAgent:
     def _build_default_llm(tape_store: TapeStore | None) -> LLM:
         store = tape_store or SeekDBTapeStore.from_env()
         model = os.getenv("REPUBLIC_MODEL")
+        provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+        llm_model = os.getenv("LLM_MODEL")
+
+        # Qwen is typically accessed through OpenAI-compatible endpoints.
+        if model and model.startswith("qwen:"):
+            model = f"openai:{model.split(':', 1)[1]}"
         if not model:
-            provider = os.getenv("LLM_PROVIDER")
-            llm_model = os.getenv("LLM_MODEL")
+            effective_provider = provider
+            if provider in {"qwen", "dashscope"}:
+                effective_provider = "openai"
             if provider and llm_model and ":" not in llm_model:
-                model = f"{provider}:{llm_model}"
+                model = f"{effective_provider}:{llm_model}"
             else:
                 model = llm_model
         if not model:
@@ -234,6 +241,8 @@ class SimpleAgent:
 
         api_key = os.getenv("REPUBLIC_API_KEY") or os.getenv("LLM_API_KEY")
         api_base = os.getenv("REPUBLIC_API_BASE") or os.getenv("LLM_API_BASE")
+        if not api_base and provider in {"qwen", "dashscope"}:
+            api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         verbose = int(os.getenv("REPUBLIC_VERBOSE", "0"))
 
         kwargs: dict[str, Any] = {

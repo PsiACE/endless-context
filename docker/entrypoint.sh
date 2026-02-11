@@ -38,20 +38,39 @@ start_seekdb() {
   exit 1
 }
 
-start_seekdb
-sleep "${SEEKDB_START_DELAY:-2}"
+db_host="${OCEANBASE_HOST:-127.0.0.1}"
+db_port="${OCEANBASE_PORT:-2881}"
+db_user="${OCEANBASE_USER:-root}"
+db_name="${OCEANBASE_DATABASE:-republic}"
+db_pass="${OCEANBASE_PASSWORD:-${ROOT_PASSWORD:-}}"
+start_local_seekdb="${START_LOCAL_SEEKDB:-auto}"
+
+if [ "${start_local_seekdb}" = "auto" ]; then
+  if [ "${db_host}" = "127.0.0.1" ] || [ "${db_host}" = "localhost" ]; then
+    start_local_seekdb="true"
+  else
+    start_local_seekdb="false"
+  fi
+fi
+
+if [ "${start_local_seekdb}" = "true" ]; then
+  start_seekdb
+  sleep "${SEEKDB_START_DELAY:-2}"
+else
+  echo "Using external SeekDB at ${db_host}:${db_port}, skip local startup"
+fi
 
 # Wait for SeekDB to be ready and create database
 echo "Waiting for SeekDB to be ready..."
 max_attempts=30
 attempt=0
 while [ $attempt -lt $max_attempts ]; do
-  if mysql -h127.0.0.1 -P2881 -uroot ${ROOT_PASSWORD:+-p${ROOT_PASSWORD}} -e "SELECT 1" >/dev/null 2>&1; then
+  if mysql -h"${db_host}" -P"${db_port}" -u"${db_user}" ${db_pass:+-p${db_pass}} -e "SELECT 1" >/dev/null 2>&1; then
     echo "SeekDB is ready!"
     break
   fi
   attempt=$((attempt + 1))
-  echo "Waiting for SeekDB... ($attempt/$max_attempts)"
+  echo "Waiting for SeekDB at ${db_host}:${db_port}... ($attempt/$max_attempts)"
   sleep 2
 done
 
@@ -60,13 +79,13 @@ if [ $attempt -eq $max_attempts ]; then
   exit 1
 fi
 
-# Create powermem database if it doesn't exist
-echo "Creating powermem database if not exists..."
-mysql -h127.0.0.1 -P2881 -uroot ${ROOT_PASSWORD:+-p${ROOT_PASSWORD}} -e "CREATE DATABASE IF NOT EXISTS powermem;" || {
+# Create database if it doesn't exist
+echo "Creating database ${db_name} if not exists..."
+mysql -h"${db_host}" -P"${db_port}" -u"${db_user}" ${db_pass:+-p${db_pass}} -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\`;" || {
   echo "Failed to create database"
   exit 1
 }
 
 echo "Database setup complete!"
 
-exec uv run python app.py
+exec uv run --no-dev python app.py
