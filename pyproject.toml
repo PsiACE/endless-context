@@ -1,16 +1,17 @@
 [project]
 name = "endless-context"
 version = "0.1.0"
-description = "A tape-first Gradio chat agent powered by Republic and SeekDB."
+description = "A Bub-powered Gradio chat agent with SeekDB tape storage."
 authors = [
     { name = "PsiACE", email = "psiace@apache.org" },
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "gradio>=4.0.0",
-    "republic>=0.3.1",
+    "bub==0.2.1",
     "pyobvector>=0.2.22",
+    "sqlalchemy>=2.0.0",
 ]
 
 [project.urls]
@@ -38,7 +39,7 @@ source-includes = ["app.py", "README.md", ".env.example"]
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]

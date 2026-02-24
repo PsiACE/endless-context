@@ -1,4 +1,4 @@
-from endless_context.agent import SimpleAgent
+from endless_context.agent import BubAgent
 
-__all__ = ["SimpleAgent"]
+__all__ = ["BubAgent"]
 __version__ = "0.1.0"

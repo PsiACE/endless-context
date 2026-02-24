@@ -1,28 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from republic import LLM
-from republic.tape.context import LAST_ANCHOR, TapeContext
-from republic.tape.entries import TapeEntry
-from republic.tape.store import TapeStore
+from bub.app.runtime import AppRuntime
 
-from endless_context.tape_store import SeekDBTapeStore
+from endless_context.bub_runtime import build_runtime
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a tape-first assistant. Keep answers concise, grounded in recorded facts, "
     "and maintain continuity with handoff anchors."
 )
-AUTO_BOOTSTRAP_ANCHOR = "handoff:auto-bootstrap"
+AUTO_BOOTSTRAP_ANCHOR = "session/start"
 AUTO_BOOTSTRAP_STATE = {
-    "phase": "Bootstrap",
-    "summary": "Auto-created bootstrap anchor for context slicing.",
+    "owner": "human",
 }
 
 ViewMode = Literal["full", "latest", "from-anchor"]
+
+
+def _run_async(coro: Any) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 @dataclass(frozen=True)
@@ -38,10 +43,10 @@ class AnchorState:
 @dataclass(frozen=True)
 class ConversationSnapshot:
     tape_name: str
-    entries: list[TapeEntry]
+    entries: list[Any]
     anchors: list[AnchorState]
     active_anchor: AnchorState | None
-    context_entries: list[TapeEntry]
+    context_entries: list[Any]
     estimated_tokens: int
 
     @property
@@ -56,17 +61,20 @@ class ConversationSnapshot:
     def messages(self) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []
         for entry in self.entries:
-            if entry.kind != "message":
+            if getattr(entry, "kind", "") != "message":
                 continue
-            role = entry.payload.get("role")
-            content = entry.payload.get("content")
+            payload = getattr(entry, "payload", {})
+            if not isinstance(payload, dict):
+                continue
+            role = payload.get("role")
+            content = payload.get("content")
             if role in {"user", "assistant"} and isinstance(content, str):
                 result.append({"role": role, "content": content})
         return result
 
 
-class SimpleAgent:
-    """Republic-based chat agent with tape snapshots for Gradio UI."""
+class BubAgent:
+    """Bub-powered chat agent with Gradio-oriented snapshot helpers."""
 
     def __init__(
         self,
@@ -74,20 +82,24 @@ class SimpleAgent:
         agent_id: str = "endless-context",
         tape_name: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        llm: LLM | Any | None = None,
-        tape_store: TapeStore | None = None,
+        runtime: AppRuntime | None = None,
+        session_id: str | None = None,
+        workspace: Path | None = None,
     ) -> None:
         self.user_id = user_id
         self.agent_id = agent_id
-        self.tape_name = tape_name or f"{agent_id}:{user_id}"
         self.system_prompt = system_prompt
-        self._tape_store: TapeStore | None = tape_store
-        if llm is None:
-            if self._tape_store is None:
-                self._tape_store = SeekDBTapeStore.from_env()
-            self.llm = self._build_default_llm(tape_store=self._tape_store)
-        else:
-            self.llm = llm
+        self._workspace = workspace or Path(os.getenv("BUB_WORKSPACE_PATH", ".")).resolve()
+        self._runtime = runtime or build_runtime(self._workspace)
+        if self.system_prompt.strip():
+            self._runtime.settings = self._runtime.settings.model_copy(update={"system_prompt": self.system_prompt})
+        default_session = session_id or f"{agent_id}:{user_id}"
+        self._session_id = tape_name or default_session
+        self._session = self._runtime.get_session(self._session_id)
+
+    @property
+    def tape_name(self) -> str:
+        return str(self._session.tape.tape.name)
 
     def reply(
         self,
@@ -99,48 +111,36 @@ class SimpleAgent:
     ) -> str:
         if not isinstance(message, str):
             raise ValueError("message must be a string")
+        if not message.strip():
+            return ""
+        del history
 
         resolved_mode, resolved_anchor_name, entries, anchors = self._resolve_view(
             view_mode=view_mode,
             anchor_name=anchor_name,
             ensure_anchor=view_mode != "full",
         )
-        context = self._context_for_view(view_mode=resolved_mode, anchor_name=resolved_anchor_name)
-
-        # Count context entries for the audit trail.
         _, context_entries = select_context_entries(entries, anchors, resolved_mode, resolved_anchor_name)
-
-        result = self.llm.chat(
-            prompt=message,
-            tape=self.tape_name,
-            context=context,
-            system_prompt=self.system_prompt,
+        self._session.tape.append_event(
+            "gradio.context_selection",
+            {
+                "view_mode": resolved_mode,
+                "anchor_name": resolved_anchor_name,
+                "context_entry_count": len(context_entries),
+                "estimated_tokens": estimate_tokens(context_entries),
+            },
         )
 
-        # Record the context selection as an auditable event so that the
-        # exact view_mode / anchor used for this reply is part of the tape.
-        if self._tape_store is not None:
-            self._tape_store.append(
-                self.tape_name,
-                TapeEntry(
-                    id=0,
-                    kind="event",
-                    payload={
-                        "name": "context_selection",
-                        "view_mode": resolved_mode,
-                        "anchor_name": resolved_anchor_name,
-                        "context_entry_count": len(context_entries),
-                        "estimated_tokens": estimate_tokens(context_entries),
-                    },
-                    meta={},
-                ),
-            )
+        loop_result = _run_async(self._runtime.handle_input(self._session_id, message))
+        if loop_result.error:
+            return f"Error: {loop_result.error}"
 
-        if result.error is not None:
-            return f"Error: {result.error.message}"
-        if result.value is None:
-            return ""
-        return str(result.value)
+        outputs: list[str] = []
+        if loop_result.immediate_output and loop_result.immediate_output.strip():
+            outputs.append(loop_result.immediate_output.strip())
+        if loop_result.assistant_output and loop_result.assistant_output.strip():
+            outputs.append(loop_result.assistant_output.strip())
+        return "\n\n".join(outputs).strip()
 
     def handoff(
         self,
@@ -160,41 +160,19 @@ class SimpleAgent:
             clean_facts = [item.strip() for item in facts if item.strip()]
             if clean_facts:
                 state["facts"] = clean_facts
-        self.llm.tape(self.tape_name).handoff(normalized, state=state or None)
+        self._session.tape.handoff(normalized, state=state or None)
         return normalized
 
     def reset(self) -> None:
-        """Archive the current tape and start a new version.
-
-        Instead of deleting data, this appends an 'archived' event to the old
-        tape, then creates a fresh tape under a new versioned name.  All
-        historical entries are preserved (append-only semantics).
-        """
-        old_name = self.tape_name
-
-        # Record the archive event on the old tape before archiving.
-        if self._tape_store is not None:
-            self._tape_store.append(
-                old_name,
-                TapeEntry(
-                    id=0,
-                    kind="event",
-                    payload={
-                        "name": "tape_archived",
-                        "old_tape": old_name,
-                        "reason": "user_reset",
-                    },
-                    meta={},
-                ),
-            )
-
-        # Archive: the underlying store renames entries, preserving all data.
-        self.llm.tape(old_name).reset()
-
-        # Derive a new version name so subsequent writes go to a fresh tape.
-        base = old_name.split("::v")[0]
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        self.tape_name = f"{base}::v{ts}"
+        self._session.tape.append_event(
+            "gradio.tape_archived",
+            {
+                "old_tape": self.tape_name,
+                "reason": "user_reset",
+            },
+        )
+        self._session.tape.reset(archive=True)
+        self._runtime.reset_session_context(self._session_id)
 
     def snapshot(
         self,
@@ -222,11 +200,11 @@ class SimpleAgent:
             estimated_tokens=estimate_tokens(context_entries),
         )
 
-    def _read_entries(self) -> list[TapeEntry]:
-        return self.llm.tape(self.tape_name).read_entries()
+    def _read_entries(self) -> list[Any]:
+        return list(self._session.tape.read_entries())
 
-    def _create_bootstrap_anchor(self) -> tuple[list[TapeEntry], list[AnchorState], AnchorState | None]:
-        self.llm.tape(self.tape_name).handoff(AUTO_BOOTSTRAP_ANCHOR, state=AUTO_BOOTSTRAP_STATE)
+    def _create_bootstrap_anchor(self) -> tuple[list[Any], list[AnchorState], AnchorState | None]:
+        self._session.tape.ensure_bootstrap_anchor()
         entries = self._read_entries()
         anchors = extract_anchors(entries)
         created = find_anchor_by_name(anchors, AUTO_BOOTSTRAP_ANCHOR)
@@ -240,7 +218,7 @@ class SimpleAgent:
         view_mode: ViewMode,
         anchor_name: str | None,
         ensure_anchor: bool,
-    ) -> tuple[ViewMode, str | None, list[TapeEntry], list[AnchorState]]:
+    ) -> tuple[ViewMode, str | None, list[Any], list[AnchorState]]:
         entries = self._read_entries()
         anchors = extract_anchors(entries)
 
@@ -262,140 +240,130 @@ class SimpleAgent:
         return "from-anchor", resolved_anchor_name, entries, anchors
 
     @staticmethod
-    def _context_for_view(view_mode: ViewMode, anchor_name: str | None) -> TapeContext:
-        if view_mode == "full":
-            return TapeContext(anchor=None)
-        if view_mode == "from-anchor" and anchor_name:
-            return TapeContext(anchor=anchor_name)
-        return TapeContext(anchor=LAST_ANCHOR)
-
-    @staticmethod
     def _normalize_anchor_name(name: str) -> str:
         raw = name.strip()
         if not raw:
             raise ValueError("anchor name cannot be empty")
-        if raw.startswith("handoff:") or raw.startswith("phase:"):
+        if raw.startswith("handoff:") or raw.startswith("phase:") or raw.startswith("session/"):
             return raw
         safe = raw.lower().replace(" ", "-")
         return f"handoff:{safe}"
 
-    @staticmethod
-    def _build_default_llm(tape_store: TapeStore | None) -> LLM:
-        store = tape_store or SeekDBTapeStore.from_env()
-        model = os.getenv("REPUBLIC_MODEL")
-        provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
-        llm_model = os.getenv("LLM_MODEL")
 
-        # Qwen is typically accessed through OpenAI-compatible endpoints.
-        if model and model.startswith("qwen:"):
-            model = f"openai:{model.split(':', 1)[1]}"
-        if not model:
-            effective_provider = provider
-            if provider in {"qwen", "dashscope"}:
-                effective_provider = "openai"
-            if provider and llm_model and ":" not in llm_model:
-                model = f"{effective_provider}:{llm_model}"
-            else:
-                model = llm_model
-        if not model:
-            model = "openai:gpt-4o-mini"
-
-        api_key = os.getenv("REPUBLIC_API_KEY") or os.getenv("LLM_API_KEY")
-        api_base = os.getenv("REPUBLIC_API_BASE") or os.getenv("LLM_API_BASE")
-        if not api_base and provider in {"qwen", "dashscope"}:
-            api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        verbose = int(os.getenv("REPUBLIC_VERBOSE", "0"))
-
-        kwargs: dict[str, Any] = {
-            "tape_store": store,
-            "verbose": verbose,
-        }
-        if model:
-            kwargs["model"] = model
-        if api_key:
-            kwargs["api_key"] = api_key
-        if api_base:
-            kwargs["api_base"] = api_base
-        return LLM(**kwargs)
-
-
-def extract_anchors(entries: list[TapeEntry]) -> list[AnchorState]:
+def extract_anchors(entries: list[Any]) -> list[AnchorState]:
     anchors: list[AnchorState] = []
     for entry in entries:
-        if entry.kind != "anchor":
+        if getattr(entry, "kind", "") != "anchor":
             continue
-        name = str(entry.payload.get("name", "")).strip()
-        if not name:
+        payload = getattr(entry, "payload", {})
+        if not isinstance(payload, dict):
             continue
-        state = entry.payload.get("state")
-        state_dict = state if isinstance(state, dict) else {}
-        phase = state_dict.get("phase")
-        label = phase.strip() if isinstance(phase, str) and phase.strip() else name.split(":")[-1]
-        summary = state_dict.get("summary")
-        summary_text = summary.strip() if isinstance(summary, str) else ""
-        raw_facts = state_dict.get("facts")
-        facts = [str(item).strip() for item in raw_facts if str(item).strip()] if isinstance(raw_facts, list) else []
-        created_at = entry.meta.get("created_at") if isinstance(entry.meta, dict) else None
+        name = payload.get("name")
+        if not isinstance(name, str):
+            continue
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            state = {}
+        summary = str(state.get("summary", "")).strip()
+        facts_raw = state.get("facts")
+        facts: list[str] = []
+        if isinstance(facts_raw, list):
+            facts = [str(item).strip() for item in facts_raw if str(item).strip()]
+        phase = str(state.get("phase", "")).strip()
+        label = phase or name
+        meta = getattr(entry, "meta", {})
+        created_at = None
+        if isinstance(meta, dict):
+            raw_created_at = meta.get("created_at")
+            if isinstance(raw_created_at, str):
+                created_at = raw_created_at
         anchors.append(
             AnchorState(
-                entry_id=entry.id,
+                entry_id=int(getattr(entry, "id", 0)),
                 name=name,
-                label=label or "anchor",
-                summary=summary_text,
+                label=label,
+                summary=summary,
                 facts=facts,
-                created_at=created_at if isinstance(created_at, str) else None,
+                created_at=created_at,
             )
         )
     return anchors
 
 
-def select_context_entries(
-    entries: list[TapeEntry],
-    anchors: list[AnchorState],
-    view_mode: ViewMode,
-    anchor_name: str | None,
-) -> tuple[AnchorState | None, list[TapeEntry]]:
-    if view_mode == "full":
-        return None, entries
-
-    if view_mode == "latest":
-        if not anchors:
-            return None, entries
-        anchor = anchors[-1]
-        return anchor, entries_after_id(entries, anchor.entry_id)
-
-    if view_mode == "from-anchor":
-        target = find_anchor_by_name(anchors, anchor_name) if anchor_name else None
-        if target is None:
-            if not anchors:
-                return None, entries
-            target = anchors[-1]
-        return target, entries_after_id(entries, target.entry_id)
-
-    return None, entries
-
-
-def find_anchor_by_name(anchors: list[AnchorState], name: str) -> AnchorState | None:
-    for anchor in reversed(anchors):
-        if anchor.name == name:
+def find_anchor_by_name(anchors: list[AnchorState], anchor_name: str | None) -> AnchorState | None:
+    if not anchor_name:
+        return None
+    for anchor in anchors:
+        if anchor.name == anchor_name:
             return anchor
     return None
 
 
-def entries_after_id(entries: list[TapeEntry], entry_id: int) -> list[TapeEntry]:
-    for index, entry in enumerate(entries):
-        if entry.id == entry_id:
-            return entries[index + 1 :]
-    return entries
+def select_context_entries(
+    entries: list[Any],
+    anchors: list[AnchorState],
+    view_mode: ViewMode,
+    anchor_name: str | None,
+) -> tuple[AnchorState | None, list[Any]]:
+    if view_mode == "full":
+        return None, list(entries)
+    if not anchors:
+        return None, list(entries)
+    if view_mode == "latest":
+        active_anchor = anchors[-1]
+    else:
+        active_anchor = find_anchor_by_name(anchors, anchor_name) or anchors[-1]
+    return active_anchor, entries_after_id(entries, active_anchor.entry_id)
 
 
-def estimate_tokens(entries: list[TapeEntry]) -> int:
-    total = 0
+def entries_after_id(entries: list[Any], entry_id: int) -> list[Any]:
+    return [entry for entry in entries if int(getattr(entry, "id", 0)) > entry_id]
+
+
+def _extract_usage_tokens(entry: Any) -> int | None:
+    if getattr(entry, "kind", "") != "event":
+        return None
+    payload = getattr(entry, "payload", {})
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("name") != "run":
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    for key in ("input_tokens", "prompt_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _fallback_token_estimate_by_chars(entries: list[Any]) -> int:
+    # Fallback method: estimate tokens by characters using chars/token ~= 4.
+    total_chars = 0
     for entry in entries:
-        if entry.kind == "message":
-            content = entry.payload.get("content")
-            if isinstance(content, str):
-                total += max(1, len(content) // 4)
-                continue
-        total += 10
-    return total
+        payload = getattr(entry, "payload", {})
+        if not isinstance(payload, dict):
+            continue
+        content = payload.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        else:
+            total_chars += len(str(payload))
+    return max(1, total_chars // 4) if total_chars else 0
+
+
+def estimate_tokens(entries: list[Any]) -> int:
+    """Estimate context tokens with an explicit policy.
+
+    1) Prefer provider-reported usage from latest `event(name="run")`.
+    2) Fallback to deterministic char-based estimate when usage is unavailable.
+    """
+    for entry in reversed(entries):
+        usage_tokens = _extract_usage_tokens(entry)
+        if usage_tokens is not None:
+            return usage_tokens
+    return _fallback_token_estimate_by_chars(entries)

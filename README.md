@@ -21,11 +21,11 @@ license: Apache License 2.0
 
 # Endless Context
 
-A lightweight Gradio chat agent with tape-first context management powered by Republic, SeekDB, and OceanBase. Built to be ModelScope-friendly while staying easy to run locally.
+A lightweight Gradio chat agent with tape-first context management powered by Bub, SeekDB, and OceanBase. Built to be ModelScope-friendly while staying easy to run locally.
 
 ## What it is
 
-- Tape-first chat orchestration with Republic (append-only entries + handoff anchors)
+- Bub runtime for deterministic loop/tool routing and tape-first orchestration
 - SeekDB-backed persistent tape store via pyobvector dialect
 - Three-pane Gradio UI (Tape / Conversation / Anchors) with context-window indicator
 - Works out of the box on ModelScope Docker Studio via the included `Dockerfile`
@@ -35,7 +35,7 @@ A lightweight Gradio chat agent with tape-first context management powered by Re
 
 1) Keep the provided `Dockerfile` and `docker/entrypoint.sh` (they start SeekDB and the app).
 2) Exposed ports: `7860` (Gradio) and `2881` (SeekDB). Entry file is `app.py`.
-3) Set environment secrets in Studio, e.g. `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_API_BASE`, `OCEANBASE_HOST`, `OCEANBASE_PORT`, `OCEANBASE_USER`, `OCEANBASE_PASSWORD`, `OCEANBASE_DATABASE`, and optional `REPUBLIC_*` overrides. For Qwen, use `LLM_PROVIDER=openai`, `LLM_MODEL=qwen-plus`, and `LLM_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1`.
+3) Set environment secrets in Studio, e.g. `BUB_MODEL`, `LLM_API_KEY`, `LLM_API_BASE`, `OCEANBASE_HOST`, `OCEANBASE_PORT`, `OCEANBASE_USER`, `OCEANBASE_PASSWORD`, `OCEANBASE_DATABASE`, and optional `BUB_TAPE_TABLE`.
 4) Build and run; open the forwarded `7860` port to use the chat UI.
 
 ## Run locally (preferred: Docker)
@@ -70,7 +70,7 @@ Apache License 2.0
 
 ## Related
 
-- Republic: https://github.com/PsiACE/republic
+- Bub: https://github.com/PsiACE/bub
 - pyobvector: https://github.com/oceanbase/pyobvector
 - SeekDB: https://www.oceanbase.ai/product/seekdb
 - OceanBase: https://www.oceanbase.com/

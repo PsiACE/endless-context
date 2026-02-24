@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from republic.tape.entries import TapeEntry
 
 from endless_context.agent import AnchorState, ConversationSnapshot
 
@@ -22,11 +21,19 @@ def _load_app_module():
 app_module = _load_app_module()
 
 
+@dataclass(frozen=True)
+class _Entry:
+    id: int
+    kind: str
+    payload: dict[str, Any]
+    meta: dict[str, Any]
+
+
 def _build_snapshot(view_mode: str, anchor_name: str | None) -> ConversationSnapshot:
     entries = [
-        TapeEntry(1, "message", {"role": "user", "content": "hi"}, {}),
-        TapeEntry(2, "anchor", {"name": "handoff:phase-1", "state": {"phase": "Phase 1"}}, {}),
-        TapeEntry(3, "message", {"role": "assistant", "content": "ok"}, {}),
+        _Entry(1, "message", {"role": "user", "content": "hi"}, {}),
+        _Entry(2, "anchor", {"name": "handoff:phase-1", "state": {"phase": "Phase 1"}}, {}),
+        _Entry(3, "message", {"role": "assistant", "content": "ok"}, {}),
     ]
     anchors = [
         AnchorState(

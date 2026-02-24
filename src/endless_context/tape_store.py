@@ -4,17 +4,20 @@ import json
 import os
 import re
 import threading
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pyobvector  # noqa: F401
-from republic.tape.entries import TapeEntry
-from republic.tape.store import TapeStore
+from bub.tape.store import TapeEntry
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine import URL
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FORK_SUFFIX_DELIMITER = "__"
 
 
 def _validate_identifier(value: str, field_name: str) -> str:
@@ -55,17 +58,18 @@ class SeekDBConfig:
             port=int(os.getenv("OCEANBASE_PORT", "2881")),
             user=os.getenv("OCEANBASE_USER", "root"),
             password=os.getenv("OCEANBASE_PASSWORD", ""),
-            database=_validate_identifier(os.getenv("OCEANBASE_DATABASE", "republic"), "database name"),
-            table_name=_validate_identifier(os.getenv("REPUBLIC_TAPE_TABLE", "republic_tape_entries"), "table name"),
+            database=_validate_identifier(os.getenv("OCEANBASE_DATABASE", "bub"), "database name"),
+            table_name=_validate_identifier(os.getenv("BUB_TAPE_TABLE", "bub_tape_entries"), "table name"),
         )
 
 
-class SeekDBTapeStore(TapeStore):
-    """TapeStore backed by SeekDB/OceanBase using the pyobvector SQLAlchemy dialect."""
+class SeekDBTapeStore:
+    """SeekDB-backed tape store compatible with Bub's FileTapeStore protocol."""
 
     def __init__(self, config: SeekDBConfig) -> None:
         self._config = config
-        self._append_lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._fork_start_ids: dict[str, int] = {}
         _register_oceanbase_dialect()
         self._ensure_database()
         self._engine = create_engine(self._build_url(config.database), pool_pre_ping=True, future=True)
@@ -76,24 +80,131 @@ class SeekDBTapeStore(TapeStore):
         return cls(SeekDBConfig.from_env())
 
     def list_tapes(self) -> list[str]:
-        sql = text(f"SELECT DISTINCT tape_name FROM `{self._config.table_name}` ORDER BY tape_name ASC")
+        sql = text(
+            f"""
+            SELECT DISTINCT tape_name
+            FROM `{self._config.table_name}`
+            WHERE tape_name NOT LIKE :fork_pattern
+              AND tape_name NOT LIKE :archive_pattern
+            ORDER BY tape_name ASC
+            """
+        )
         with self._engine.connect() as conn:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(
+                sql,
+                {
+                    "fork_pattern": f"%{_FORK_SUFFIX_DELIMITER}%",
+                    "archive_pattern": "%::archived::%",
+                },
+            ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def fork(self, source: str) -> str:
+        fork_suffix = uuid.uuid4().hex[:8]
+        fork_name = f"{source}{_FORK_SUFFIX_DELIMITER}{fork_suffix}"
+        with self._lock:
+            with self._engine.begin() as conn:
+                rows = conn.execute(
+                    text(
+                        f"""
+                        SELECT entry_id, kind, payload_json, meta_json
+                        FROM `{self._config.table_name}`
+                        WHERE tape_name = :source
+                        ORDER BY entry_id ASC
+                        """
+                    ),
+                    {"source": source},
+                ).fetchall()
+                if rows:
+                    conn.execute(
+                        text(
+                            f"""
+                            INSERT INTO `{self._config.table_name}`
+                                (tape_name, entry_id, kind, payload_json, meta_json)
+                            VALUES
+                                (:tape_name, :entry_id, :kind, :payload_json, :meta_json)
+                            """
+                        ),
+                        [
+                            {
+                                "tape_name": fork_name,
+                                "entry_id": int(row[0]),
+                                "kind": str(row[1]),
+                                "payload_json": str(row[2]),
+                                "meta_json": str(row[3]),
+                            }
+                            for row in rows
+                        ],
+                    )
+                start_id = int(rows[-1][0]) + 1 if rows else 1
+                self._fork_start_ids[fork_name] = start_id
+        return fork_name
+
+    def merge(self, source: str, target: str) -> None:
+        with self._lock:
+            with self._engine.begin() as conn:
+                start_id = self._fork_start_ids.get(source, 1)
+                source_rows = conn.execute(
+                    text(
+                        f"""
+                        SELECT kind, payload_json, meta_json
+                        FROM `{self._config.table_name}`
+                        WHERE tape_name = :source
+                          AND entry_id >= :start_id
+                        ORDER BY entry_id ASC
+                        """
+                    ),
+                    {"source": source, "start_id": start_id},
+                ).fetchall()
+                if source_rows:
+                    target_next_id = int(
+                        conn.execute(
+                            text(
+                                f"""
+                                SELECT COALESCE(MAX(entry_id), 0) + 1
+                                FROM `{self._config.table_name}`
+                                WHERE tape_name = :target
+                                """
+                            ),
+                            {"target": target},
+                        ).scalar_one()
+                    )
+                    payloads = []
+                    for offset, row in enumerate(source_rows):
+                        payloads.append(
+                            {
+                                "tape_name": target,
+                                "entry_id": target_next_id + offset,
+                                "kind": str(row[0]),
+                                "payload_json": str(row[1]),
+                                "meta_json": str(row[2]),
+                            }
+                        )
+                    conn.execute(
+                        text(
+                            f"""
+                            INSERT INTO `{self._config.table_name}`
+                                (tape_name, entry_id, kind, payload_json, meta_json)
+                            VALUES
+                                (:tape_name, :entry_id, :kind, :payload_json, :meta_json)
+                            """
+                        ),
+                        payloads,
+                    )
+                conn.execute(
+                    text(f"DELETE FROM `{self._config.table_name}` WHERE tape_name = :source"),
+                    {"source": source},
+                )
+                self._fork_start_ids.pop(source, None)
+
     def reset(self, tape: str) -> None:
-        """Archive the tape by renaming its entries instead of deleting them.
-
-        This preserves all historical data (append-only semantics) while making
-        the tape logically empty for new interactions.
-        """
-        from datetime import datetime, timezone
-
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-        archived_name = f"{tape}::archived::{ts}"
-        sql = text(f"UPDATE `{self._config.table_name}` SET tape_name = :archived WHERE tape_name = :tape")
-        with self._engine.begin() as conn:
-            conn.execute(sql, {"archived": archived_name, "tape": tape})
+        with self._lock:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(f"DELETE FROM `{self._config.table_name}` WHERE tape_name = :tape"),
+                    {"tape": tape},
+                )
+            self._fork_start_ids.pop(tape, None)
 
     def read(self, tape: str) -> list[TapeEntry] | None:
         sql = text(
@@ -128,37 +239,73 @@ class SeekDBTapeStore(TapeStore):
         return entries
 
     def append(self, tape: str, entry: TapeEntry) -> None:
-        payload_json = json.dumps(entry.payload, ensure_ascii=False, separators=(",", ":"))
-        meta_json = json.dumps(entry.meta, ensure_ascii=False, separators=(",", ":"))
-        with self._append_lock:
-            with self._engine.begin() as conn:
-                next_id_sql = text(
-                    f"""
-                    SELECT COALESCE(MAX(entry_id), 0) + 1
-                    FROM `{self._config.table_name}`
-                    WHERE tape_name = :tape
-                    """
-                )
-                next_id = int(conn.execute(next_id_sql, {"tape": tape}).scalar_one())
+        payload_json = json.dumps(dict(getattr(entry, "payload", {})), ensure_ascii=False, separators=(",", ":"))
+        meta_json = json.dumps(dict(getattr(entry, "meta", {})), ensure_ascii=False, separators=(",", ":"))
+        kind = str(getattr(entry, "kind", "event"))
 
-                insert_sql = text(
-                    f"""
-                    INSERT INTO `{self._config.table_name}`
-                        (tape_name, entry_id, kind, payload_json, meta_json)
-                    VALUES
-                        (:tape_name, :entry_id, :kind, :payload_json, :meta_json)
-                    """
+        with self._lock:
+            with self._engine.begin() as conn:
+                next_id = int(
+                    conn.execute(
+                        text(
+                            f"""
+                            SELECT COALESCE(MAX(entry_id), 0) + 1
+                            FROM `{self._config.table_name}`
+                            WHERE tape_name = :tape
+                            """
+                        ),
+                        {"tape": tape},
+                    ).scalar_one()
                 )
                 conn.execute(
-                    insert_sql,
+                    text(
+                        f"""
+                        INSERT INTO `{self._config.table_name}`
+                            (tape_name, entry_id, kind, payload_json, meta_json)
+                        VALUES
+                            (:tape_name, :entry_id, :kind, :payload_json, :meta_json)
+                        """
+                    ),
                     {
                         "tape_name": tape,
                         "entry_id": next_id,
-                        "kind": entry.kind,
+                        "kind": kind,
                         "payload_json": payload_json,
                         "meta_json": meta_json,
                     },
                 )
+
+    def archive(self, tape: str) -> Path | None:
+        with self._lock:
+            with self._engine.begin() as conn:
+                count = int(
+                    conn.execute(
+                        text(
+                            f"""
+                            SELECT COUNT(*)
+                            FROM `{self._config.table_name}`
+                            WHERE tape_name = :tape
+                            """
+                        ),
+                        {"tape": tape},
+                    ).scalar_one()
+                )
+                if count == 0:
+                    return None
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                archived_name = f"{tape}::archived::{stamp}"
+                conn.execute(
+                    text(
+                        f"""
+                        UPDATE `{self._config.table_name}`
+                        SET tape_name = :archived
+                        WHERE tape_name = :tape
+                        """
+                    ),
+                    {"archived": archived_name, "tape": tape},
+                )
+                self._fork_start_ids.pop(tape, None)
+                return Path("/seekdb/archive") / archived_name
 
     def _ensure_database(self) -> None:
         admin_engine = create_engine(self._build_url(database=None), pool_pre_ping=True, future=True)
@@ -182,7 +329,7 @@ class SeekDBTapeStore(TapeStore):
             created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
             PRIMARY KEY (id),
             UNIQUE KEY uniq_tape_entry (tape_name, entry_id),
-            KEY idx_tape_created (tape_name, created_at)
+            KEY idx_tape_name_created (tape_name, created_at)
         ) DEFAULT CHARSET = utf8mb4
         """
         with self._engine.begin() as conn:

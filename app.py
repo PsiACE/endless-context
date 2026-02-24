@@ -6,15 +6,15 @@ from typing import Any
 
 import gradio as gr
 
-from endless_context.agent import ConversationSnapshot, SimpleAgent, ViewMode
+from endless_context.agent import BubAgent, ConversationSnapshot, ViewMode
 
-_agent: SimpleAgent | None = None
+_agent: BubAgent | None = None
 
 
-def get_agent() -> SimpleAgent:
+def get_agent() -> BubAgent:
     global _agent
     if _agent is None:
-        _agent = SimpleAgent()
+        _agent = BubAgent()
     return _agent
 
 

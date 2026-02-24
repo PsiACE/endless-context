@@ -3,7 +3,7 @@ FROM quay.io/oceanbase/seekdb:latest
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN if command -v yum >/dev/null 2>&1; then \
-      yum install -y --allowerasing curl ca-certificates python3 python3-pip python3.11 python3.11-pip && \
+      yum install -y --allowerasing curl ca-certificates python3 python3-pip python3.12 python3.12-pip && \
       yum clean all; \
     else \
       echo "No supported package manager found." && exit 1; \
@@ -15,7 +15,7 @@ ENV UV_INDEX_URL=${PIP_INDEX_URL}
 ENV UV_LINK_MODE=copy
 ENV UV_HTTP_TIMEOUT=300
 
-RUN python3.11 -m pip install --no-cache-dir -U uv -i "${PIP_INDEX_URL}"
+RUN python3.12 -m pip install --no-cache-dir -U uv -i "${PIP_INDEX_URL}"
 
 ENV PATH="/root/.local/bin:${PATH}"
 
@@ -28,7 +28,7 @@ COPY .env.example ./.env.example
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
-RUN uv sync --frozen --python python3.11 --no-dev
+RUN uv sync --frozen --python python3.12 --no-dev
 
 ENV GRADIO_SERVER_NAME=0.0.0.0
 ENV GRADIO_SERVER_PORT=7860
