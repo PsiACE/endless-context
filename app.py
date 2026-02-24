@@ -199,14 +199,32 @@ def _refresh(view_mode: ViewMode, anchor_name: str | None):
     return chat, log, anchor_upd, anchors, footer, ctx, ""
 
 
-def _send(message: str, view_mode: ViewMode, anchor_name: str | None):
+def _send_stage1(message: str, chat_history: list[dict[str, str]] | None):
+    text = message.strip()
+    if not text:
+        return "", chat_history or [], "", ""
+    history = list(chat_history or [])
+    history.append({"role": "user", "content": text})
+    return "", history, "", text
+
+
+def _send_stage2(pending_message: str, view_mode: ViewMode, anchor_name: str | None):
     status = ""
-    if message.strip():
-        reply = get_agent().reply(message, view_mode=view_mode, anchor_name=anchor_name)
+    text = pending_message.strip()
+    reply = ""
+    if text:
+        reply = get_agent().reply(text, view_mode=view_mode, anchor_name=anchor_name)
         if reply.startswith("Error:"):
             status = reply
     chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name)
-    return "", chat, log, anchor_upd, anchors, footer, ctx, status
+    # Comma commands are usually persisted as events instead of assistant messages.
+    # Keep them visible in chat to avoid confusing "disappearing" interactions.
+    if text.startswith(","):
+        if not chat or chat[-1].get("role") != "user" or chat[-1].get("content") != text:
+            chat.append({"role": "user", "content": text})
+        if reply and not reply.startswith("Error:"):
+            chat.append({"role": "assistant", "content": reply})
+    return chat, log, anchor_upd, anchors, footer, ctx, status, ""
 
 
 def _create_handoff(name: str, phase: str, summary: str, facts_text: str):
@@ -362,6 +380,7 @@ with gr.Blocks(title="Endless Context") as demo:
                 handoff_button = gr.Button("Create", variant="secondary")
 
     status_text = gr.Markdown()
+    pending_message = gr.State("")
 
     # ------------------------------------------------------------------
     # Shared output lists (avoids repetition)
@@ -372,26 +391,54 @@ with gr.Blocks(title="Endless Context") as demo:
     # Event wiring — uses .input (not .change) to prevent cascade
     # ------------------------------------------------------------------
 
-    demo.load(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core)
+    demo.load(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
 
     # User manually switches radio / dropdown — .input fires only on direct interaction
-    view_mode.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core)
-    anchor_selector.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core)
+    view_mode.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
+    anchor_selector.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
 
-    refresh_button.click(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core)
+    refresh_button.click(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
 
-    send_button.click(fn=_send, inputs=[user_input, view_mode, anchor_selector], outputs=[user_input] + _core)
-    user_input.submit(fn=_send, inputs=[user_input, view_mode, anchor_selector], outputs=[user_input] + _core)
+    send_button.click(
+        fn=_send_stage1,
+        inputs=[user_input, chatbot],
+        outputs=[user_input, chatbot, status_text, pending_message],
+        queue=False,
+        show_progress="hidden",
+    ).then(
+        fn=_send_stage2,
+        inputs=[pending_message, view_mode, anchor_selector],
+        outputs=_core + [pending_message],
+        show_progress="hidden",
+    )
+    user_input.submit(
+        fn=_send_stage1,
+        inputs=[user_input, chatbot],
+        outputs=[user_input, chatbot, status_text, pending_message],
+        queue=False,
+        show_progress="hidden",
+    ).then(
+        fn=_send_stage2,
+        inputs=[pending_message, view_mode, anchor_selector],
+        outputs=_core + [pending_message],
+        show_progress="hidden",
+    )
 
     handoff_button.click(
         fn=_create_handoff,
         inputs=[handoff_name, handoff_phase, handoff_summary, handoff_facts],
         outputs=[handoff_name, handoff_phase, handoff_summary, handoff_facts, view_mode] + _core,
+        show_progress="hidden",
     )
 
-    full_tape_button.click(fn=lambda: _switch_view("full"), outputs=[view_mode] + _core)
-    latest_anchor_button.click(fn=lambda: _switch_view("latest"), outputs=[view_mode] + _core)
-    anchors_table.select(fn=_select_anchor_from_table, inputs=[anchors_table], outputs=[view_mode] + _core)
+    full_tape_button.click(fn=lambda: _switch_view("full"), outputs=[view_mode] + _core, show_progress="hidden")
+    latest_anchor_button.click(fn=lambda: _switch_view("latest"), outputs=[view_mode] + _core, show_progress="hidden")
+    anchors_table.select(
+        fn=_select_anchor_from_table,
+        inputs=[anchors_table],
+        outputs=[view_mode] + _core,
+        show_progress="hidden",
+    )
 
 if __name__ == "__main__":
     demo.launch(
