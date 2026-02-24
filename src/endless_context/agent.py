@@ -61,15 +61,33 @@ class ConversationSnapshot:
     def messages(self) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []
         for entry in self.entries:
-            if getattr(entry, "kind", "") != "message":
-                continue
+            kind = getattr(entry, "kind", "")
             payload = getattr(entry, "payload", {})
             if not isinstance(payload, dict):
                 continue
-            role = payload.get("role")
-            content = payload.get("content")
-            if role in {"user", "assistant"} and isinstance(content, str):
-                result.append({"role": role, "content": content})
+
+            if kind == "message":
+                role = payload.get("role")
+                content = payload.get("content")
+                if role in {"user", "assistant"} and isinstance(content, str):
+                    result.append({"role": role, "content": content})
+                continue
+
+            # Comma commands are persisted as events; include them in chat history
+            # so refresh does not "lose" the interaction.
+            if kind != "event" or payload.get("name") != "command":
+                continue
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                continue
+            raw = data.get("raw")
+            output = data.get("output")
+            if isinstance(raw, str) and raw.strip():
+                user_msg = {"role": "user", "content": raw}
+                if not result or result[-1] != user_msg:
+                    result.append(user_msg)
+            if isinstance(output, str) and output.strip():
+                result.append({"role": "assistant", "content": output})
         return result
 
 

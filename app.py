@@ -217,13 +217,6 @@ def _send_stage2(pending_message: str, view_mode: ViewMode, anchor_name: str | N
         if reply.startswith("Error:"):
             status = reply
     chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name)
-    # Comma commands are usually persisted as events instead of assistant messages.
-    # Keep them visible in chat to avoid confusing "disappearing" interactions.
-    if text.startswith(","):
-        if not chat or chat[-1].get("role") != "user" or chat[-1].get("content") != text:
-            chat.append({"role": "user", "content": text})
-        if reply and not reply.startswith("Error:"):
-            chat.append({"role": "assistant", "content": reply})
     return chat, log, anchor_upd, anchors, footer, ctx, status, ""
 
 
