@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -40,6 +41,21 @@ def _safe_load_json(raw: str | None) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _to_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if asyncio.iscoroutine(value):
+        # Keep tape persistence robust even if an upstream tool returns a
+        # coroutine object by mistake (should be awaited before persistence).
+        value.close()
+        return {"_type": "coroutine", "note": "unawaited_tool_result"}
+    if isinstance(value, dict):
+        return {str(key): _to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(item) for item in value]
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -228,20 +244,22 @@ class SeekDBTapeStore:
             created_at = row[4]
             if created_at is not None:
                 meta.setdefault("created_at", created_at.isoformat())
-            entries.append(
-                TapeEntry(
-                    id=int(row[0]),
-                    kind=str(row[1]),
-                    payload=payload,
-                    meta=meta,
-                )
+            entry = self.entry_from_payload(
+                {
+                    "id": int(row[0]),
+                    "kind": str(row[1]),
+                    "payload": payload,
+                    "meta": meta,
+                }
             )
+            if entry is not None:
+                entries.append(entry)
         return entries
 
     def append(self, tape: str, entry: TapeEntry) -> None:
-        payload_json = json.dumps(dict(getattr(entry, "payload", {})), ensure_ascii=False, separators=(",", ":"))
-        meta_json = json.dumps(dict(getattr(entry, "meta", {})), ensure_ascii=False, separators=(",", ":"))
-        kind = str(getattr(entry, "kind", "event"))
+        raw_kind = str(getattr(entry, "kind", "event"))
+        raw_payload = dict(getattr(entry, "payload", {}))
+        raw_meta = dict(getattr(entry, "meta", {}))
 
         with self._lock:
             with self._engine.begin() as conn:
@@ -257,6 +275,12 @@ class SeekDBTapeStore:
                         {"tape": tape},
                     ).scalar_one()
                 )
+                stored = TapeEntry(next_id, raw_kind, raw_payload, raw_meta)
+                payload_doc = self.entry_to_payload(stored)
+                payload_json = json.dumps(
+                    _to_json_safe(payload_doc["payload"]), ensure_ascii=False, separators=(",", ":")
+                )
+                meta_json = json.dumps(_to_json_safe(payload_doc["meta"]), ensure_ascii=False, separators=(",", ":"))
                 conn.execute(
                     text(
                         f"""
@@ -268,12 +292,39 @@ class SeekDBTapeStore:
                     ),
                     {
                         "tape_name": tape,
-                        "entry_id": next_id,
-                        "kind": kind,
+                        "entry_id": int(payload_doc["id"]),
+                        "kind": str(payload_doc["kind"]),
                         "payload_json": payload_json,
                         "meta_json": meta_json,
                     },
                 )
+
+    @staticmethod
+    def entry_to_payload(entry: TapeEntry) -> dict[str, object]:
+        return {
+            "id": int(getattr(entry, "id", 0)),
+            "kind": str(getattr(entry, "kind", "event")),
+            "payload": dict(getattr(entry, "payload", {})),
+            "meta": dict(getattr(entry, "meta", {})),
+        }
+
+    @staticmethod
+    def entry_from_payload(payload: object) -> TapeEntry | None:
+        if not isinstance(payload, dict):
+            return None
+        entry_id = payload.get("id")
+        kind = payload.get("kind")
+        entry_payload = payload.get("payload")
+        meta = payload.get("meta")
+        if not isinstance(entry_id, int):
+            return None
+        if not isinstance(kind, str):
+            return None
+        if not isinstance(entry_payload, dict):
+            return None
+        if not isinstance(meta, dict):
+            meta = {}
+        return TapeEntry(entry_id, kind, dict(entry_payload), dict(meta))
 
     def archive(self, tape: str) -> Path | None:
         with self._lock:

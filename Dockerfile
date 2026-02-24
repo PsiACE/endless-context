@@ -12,8 +12,11 @@ RUN if command -v yum >/dev/null 2>&1; then \
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 ENV UV_INDEX_URL=${PIP_INDEX_URL}
+ENV UV_DEFAULT_INDEX=${PIP_INDEX_URL}
 ENV UV_LINK_MODE=copy
 ENV UV_HTTP_TIMEOUT=300
+ENV UV_HTTP_RETRIES=3
+ENV UV_INDEX_STRATEGY=unsafe-first-match
 
 RUN python3.12 -m pip install --no-cache-dir -U uv -i "${PIP_INDEX_URL}"
 
@@ -28,7 +31,7 @@ COPY .env.example ./.env.example
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
-RUN uv sync --frozen --python python3.12 --no-dev
+RUN uv sync --frozen --python python3.12 --no-dev --default-index "${PIP_INDEX_URL}"
 
 ENV GRADIO_SERVER_NAME=0.0.0.0
 ENV GRADIO_SERVER_PORT=7860
