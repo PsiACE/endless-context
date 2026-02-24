@@ -58,13 +58,13 @@ def _simulate_gradio_send(base_url: str, message: str) -> tuple[bool, str]:
     elapsed = time.time() - start
 
     # _send returns:
-    # (message, messages, tape_entries, anchor, table, tape_footer, chat_header, context_indicator, status_text)
+    # (message, messages, tape_entries, anchor, table, tape_footer, context_indicator, status_text)
     status_text = ""
     assistant_preview = ""
     chat_messages: list[dict[str, Any]] = []
-    if isinstance(result, tuple) and len(result) >= 9:
+    if isinstance(result, tuple) and len(result) >= 8:
         chat_messages = result[1] if isinstance(result[1], list) else []
-        status_text = str(result[8] or "")
+        status_text = str(result[7] or "")
 
     for item in reversed(chat_messages):
         if isinstance(item, dict) and item.get("role") == "assistant":

@@ -39,8 +39,10 @@ class _FakeConnection:
             rows = [(name,) for name in sorted(self._state.keys())]
             return _FakeResult(rows=rows)
 
-        if "delete from" in sql and "where tape_name = :tape" in sql:
-            self._state.pop(params["tape"], None)
+        if "update" in sql and "set tape_name = :archived" in sql and "where tape_name = :tape" in sql:
+            entries = self._state.pop(params["tape"], [])
+            if entries:
+                self._state.setdefault(params["archived"], []).extend(entries)
             return _FakeResult()
 
         if "select entry_id, kind, payload_json, meta_json, created_at" in sql:

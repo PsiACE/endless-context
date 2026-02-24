@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
 from republic import LLM
@@ -80,7 +81,13 @@ class SimpleAgent:
         self.agent_id = agent_id
         self.tape_name = tape_name or f"{agent_id}:{user_id}"
         self.system_prompt = system_prompt
-        self.llm = llm or self._build_default_llm(tape_store=tape_store)
+        self._tape_store: TapeStore | None = tape_store
+        if llm is None:
+            if self._tape_store is None:
+                self._tape_store = SeekDBTapeStore.from_env()
+            self.llm = self._build_default_llm(tape_store=self._tape_store)
+        else:
+            self.llm = llm
 
     def reply(
         self,
@@ -93,18 +100,42 @@ class SimpleAgent:
         if not isinstance(message, str):
             raise ValueError("message must be a string")
 
-        resolved_mode, resolved_anchor_name, _, _ = self._resolve_view(
+        resolved_mode, resolved_anchor_name, entries, anchors = self._resolve_view(
             view_mode=view_mode,
             anchor_name=anchor_name,
             ensure_anchor=view_mode != "full",
         )
         context = self._context_for_view(view_mode=resolved_mode, anchor_name=resolved_anchor_name)
+
+        # Count context entries for the audit trail.
+        _, context_entries = select_context_entries(entries, anchors, resolved_mode, resolved_anchor_name)
+
         result = self.llm.chat(
             prompt=message,
             tape=self.tape_name,
             context=context,
             system_prompt=self.system_prompt,
         )
+
+        # Record the context selection as an auditable event so that the
+        # exact view_mode / anchor used for this reply is part of the tape.
+        if self._tape_store is not None:
+            self._tape_store.append(
+                self.tape_name,
+                TapeEntry(
+                    id=0,
+                    kind="event",
+                    payload={
+                        "name": "context_selection",
+                        "view_mode": resolved_mode,
+                        "anchor_name": resolved_anchor_name,
+                        "context_entry_count": len(context_entries),
+                        "estimated_tokens": estimate_tokens(context_entries),
+                    },
+                    meta={},
+                ),
+            )
+
         if result.error is not None:
             return f"Error: {result.error.message}"
         if result.value is None:
@@ -133,7 +164,37 @@ class SimpleAgent:
         return normalized
 
     def reset(self) -> None:
-        self.llm.tape(self.tape_name).reset()
+        """Archive the current tape and start a new version.
+
+        Instead of deleting data, this appends an 'archived' event to the old
+        tape, then creates a fresh tape under a new versioned name.  All
+        historical entries are preserved (append-only semantics).
+        """
+        old_name = self.tape_name
+
+        # Record the archive event on the old tape before archiving.
+        if self._tape_store is not None:
+            self._tape_store.append(
+                old_name,
+                TapeEntry(
+                    id=0,
+                    kind="event",
+                    payload={
+                        "name": "tape_archived",
+                        "old_tape": old_name,
+                        "reason": "user_reset",
+                    },
+                    meta={},
+                ),
+            )
+
+        # Archive: the underlying store renames entries, preserving all data.
+        self.llm.tape(old_name).reset()
+
+        # Derive a new version name so subsequent writes go to a fresh tape.
+        base = old_name.split("::v")[0]
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        self.tape_name = f"{base}::v{ts}"
 
     def snapshot(
         self,

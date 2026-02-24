@@ -82,9 +82,18 @@ class SeekDBTapeStore(TapeStore):
         return [str(row[0]) for row in rows]
 
     def reset(self, tape: str) -> None:
-        sql = text(f"DELETE FROM `{self._config.table_name}` WHERE tape_name = :tape")
+        """Archive the tape by renaming its entries instead of deleting them.
+
+        This preserves all historical data (append-only semantics) while making
+        the tape logically empty for new interactions.
+        """
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        archived_name = f"{tape}::archived::{ts}"
+        sql = text(f"UPDATE `{self._config.table_name}` SET tape_name = :archived WHERE tape_name = :tape")
         with self._engine.begin() as conn:
-            conn.execute(sql, {"tape": tape})
+            conn.execute(sql, {"archived": archived_name, "tape": tape})
 
     def read(self, tape: str) -> list[TapeEntry] | None:
         sql = text(
@@ -156,10 +165,7 @@ class SeekDBTapeStore(TapeStore):
         try:
             with admin_engine.begin() as conn:
                 conn.execute(
-                    text(
-                        f"CREATE DATABASE IF NOT EXISTS `{self._config.database}` "
-                        "DEFAULT CHARACTER SET utf8mb4"
-                    )
+                    text(f"CREATE DATABASE IF NOT EXISTS `{self._config.database}` DEFAULT CHARACTER SET utf8mb4")
                 )
         finally:
             admin_engine.dispose()

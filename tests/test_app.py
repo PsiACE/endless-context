@@ -71,9 +71,7 @@ class FakeAgent:
         return _build_snapshot(view_mode, anchor_name)
 
     def handoff(self, name: str, *, phase: str = "", summary: str = "", facts: list[str] | None = None) -> str:
-        self.handoff_calls.append(
-            {"name": name, "phase": phase, "summary": summary, "facts": list(facts or [])}
-        )
+        self.handoff_calls.append({"name": name, "phase": phase, "summary": summary, "facts": list(facts or [])})
         return "handoff:phase-1"
 
     def reply(self, message: str, *, view_mode: str = "latest", anchor_name: str | None = None) -> str:
@@ -87,7 +85,7 @@ def test_build_view_from_anchor_fallbacks_to_latest_anchor(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    _, _, anchor_update, _, _, _, _ = app_module._build_view("from-anchor", "handoff:missing")
+    _, _, anchor_update, _, _, _ = app_module._build_view("from-anchor", "handoff:missing")
 
     assert anchor_update["interactive"] is True
     assert anchor_update["value"] == "handoff:phase-1"
@@ -99,7 +97,7 @@ def test_send_with_error_sets_status(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    _, _, _, _, _, _, _, _, status = app_module._send("boom", "latest", None)
+    _, _, _, _, _, _, _, status = app_module._send("boom", "latest", None)
 
     assert status == "Error: simulated"
     assert fake_agent.reply_calls[-1]["message"] == "boom"
@@ -136,7 +134,7 @@ def test_send_with_blank_message_does_not_call_reply(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    _, _, _, _, _, _, _, _, status = app_module._send("   ", "latest", None)
+    _, _, _, _, _, _, _, status = app_module._send("   ", "latest", None)
 
     assert status == ""
     assert fake_agent.reply_calls == []
@@ -153,15 +151,7 @@ def test_ui_contains_bottom_message_input_textbox():
     assert message_boxes, "Message input textbox should exist in the conversation area."
 
 
-def test_chat_header_contains_recording_and_source():
-    snapshot = _build_snapshot("latest", None)
-    content = app_module._render_chat_header(snapshot, "latest")
-
-    assert "Recording" in content
-    assert "From Latest" in content
-
-
-def test_context_indicator_contains_status_pill_and_progress():
+def test_context_indicator_contains_status_and_progress():
     snapshot = ConversationSnapshot(
         tape_name="t1",
         entries=[],
@@ -173,8 +163,8 @@ def test_context_indicator_contains_status_pill_and_progress():
     content = app_module._render_context(snapshot, "full")
 
     assert "HIGH" in content
-    assert "token-high" in content
-    assert "context-bar-fill" in content
+    assert "ctx-high" in content
+    assert "ctx-fill" in content
 
 
 class _FakeSelectEvent:
@@ -182,11 +172,11 @@ class _FakeSelectEvent:
         self.index = index
 
 
-def test_switch_view_mode_returns_full_mode(monkeypatch):
+def test_switch_view_returns_full_mode(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    mode, *_ = app_module._switch_view_mode("full")
+    mode, *_ = app_module._switch_view("full")
 
     assert mode == "full"
 
@@ -195,7 +185,7 @@ def test_select_anchor_from_table_switches_to_from_anchor(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    rows = [["", "Phase 1", "handoff:phase-1", "1", "checkpoint"]]
+    rows = [["", "Phase 1", "handoff:phase-1", "checkpoint"]]
     mode, _, _, anchor_update, *_ = app_module._select_anchor_from_table(rows, _FakeSelectEvent((0, 2)))
 
     assert mode == "from-anchor"
@@ -207,16 +197,16 @@ def test_context_source_label_matches_design_modes():
     full_snapshot = _build_snapshot("full", None)
     from_anchor_snapshot = _build_snapshot("from-anchor", "handoff:phase-1")
 
-    assert app_module._context_source_label(latest_snapshot, "latest") == "From Latest: Phase 1"
+    assert app_module._context_source_label(latest_snapshot, "latest") == "Latest: Phase 1"
     assert app_module._context_source_label(full_snapshot, "full") == "Full Context"
-    assert app_module._context_source_label(from_anchor_snapshot, "from-anchor") == "From Anchor: Phase 1"
+    assert app_module._context_source_label(from_anchor_snapshot, "from-anchor") == "Anchor: Phase 1"
 
 
 def test_refresh_full_mode_disables_anchor_selector(monkeypatch):
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    _, _, anchor_update, _, tape_footer, _, _, _ = app_module._refresh("full", None)
+    _, _, anchor_update, _, tape_footer, _, _ = app_module._refresh("full", None)
 
     assert anchor_update["interactive"] is False
     assert anchor_update["value"] is None
@@ -227,7 +217,7 @@ def test_select_anchor_from_table_invalid_index_falls_back_to_latest(monkeypatch
     fake_agent = FakeAgent()
     monkeypatch.setattr(app_module, "get_agent", lambda: fake_agent)
 
-    rows = [["", "Phase 1", "handoff:phase-1", "1", "checkpoint"]]
+    rows = [["", "Phase 1", "handoff:phase-1", "checkpoint"]]
     mode, _, _, anchor_update, *_ = app_module._select_anchor_from_table(rows, _FakeSelectEvent((99, 0)))
 
     assert mode == "latest"
@@ -239,10 +229,10 @@ def test_ui_context_view_control_has_expected_choices_and_default():
     radios = [
         component
         for component in components
-        if component.get("type") == "radio" and component.get("props", {}).get("label") == "Context View"
+        if component.get("type") == "radio" and component.get("props", {}).get("label") == "Context view"
     ]
 
-    assert radios, "Context View radio should exist in the tape panel."
+    assert radios, "Context view radio should exist in the tape panel."
     radio = radios[0]
     choices = [value for value, _label in radio.get("props", {}).get("choices", [])]
     assert choices == ["latest", "full", "from-anchor"]
