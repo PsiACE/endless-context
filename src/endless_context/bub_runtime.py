@@ -37,15 +37,40 @@ def _patch_republic_tool_history_replay() -> None:
     def _default_messages_with_tool_events(entries: list[Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         pending_calls: list[dict[str, Any]] = []
+
+        def append_tool_message(call: dict[str, Any], content: str) -> None:
+            call_id = ""
+            if isinstance(call.get("id"), str):
+                call_id = call["id"]
+            tool_name = ""
+            fn = call.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                tool_name = fn["name"]
+            msg: dict[str, Any] = {"role": "tool", "content": content}
+            if call_id:
+                msg["tool_call_id"] = call_id
+            if tool_name:
+                msg["name"] = tool_name
+            messages.append(msg)
+
+        def flush_pending_with_placeholder() -> None:
+            for call in pending_calls:
+                append_tool_message(call, "")
+            pending_calls.clear()
+
         for entry in entries:
             kind = getattr(entry, "kind", "")
             payload = getattr(entry, "payload", {})
             if not isinstance(payload, dict):
                 continue
             if kind == "message":
+                if pending_calls:
+                    flush_pending_with_placeholder()
                 messages.append(dict(payload))
                 continue
             if kind == "tool_call":
+                if pending_calls:
+                    flush_pending_with_placeholder()
                 calls = payload.get("calls")
                 if not isinstance(calls, list):
                     continue
@@ -59,30 +84,17 @@ def _patch_republic_tool_history_replay() -> None:
                 continue
             results = payload.get("results")
             if not isinstance(results, list):
-                continue
-            for index, result in enumerate(results):
-                call_id = ""
-                tool_name = ""
-                if index < len(pending_calls):
-                    call = pending_calls[index]
-                    raw_call_id = call.get("id")
-                    if isinstance(raw_call_id, str):
-                        call_id = raw_call_id
-                    function = call.get("function")
-                    if isinstance(function, dict):
-                        raw_tool_name = function.get("name")
-                        if isinstance(raw_tool_name, str):
-                            tool_name = raw_tool_name
-                tool_message: dict[str, Any] = {
-                    "role": "tool",
-                    "content": _json_dump_tool_result(result),
-                }
-                if call_id:
-                    tool_message["tool_call_id"] = call_id
-                if tool_name:
-                    tool_message["name"] = tool_name
-                messages.append(tool_message)
+                results = []
+            for index, call in enumerate(pending_calls):
+                content = (
+                    _json_dump_tool_result(results[index])
+                    if index < len(results)
+                    else ""
+                )
+                append_tool_message(call, content)
             pending_calls = []
+        if pending_calls:
+            flush_pending_with_placeholder()
         return messages
 
     context_module._default_messages = _default_messages_with_tool_events  # type: ignore[attr-defined]
