@@ -12,6 +12,7 @@ dependencies = [
     "bub==0.2.1",
     "pyobvector>=0.2.22",
     "sqlalchemy>=2.0.0",
+    "typer>=0.21,<0.22",
 ]
 
 [project.urls]

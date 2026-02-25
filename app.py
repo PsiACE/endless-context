@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import html
+import json
 import os
+import threading
+import time
 from typing import Any
 
 import gradio as gr
@@ -57,11 +60,35 @@ def _summarize_entry_payload(kind: str, payload: dict[str, Any]) -> str:
     return str(payload)[:120]
 
 
-def _render_log_html(snapshot: ConversationSnapshot) -> str:
+def _is_system_event(payload: dict[str, Any]) -> bool:
+    name = payload.get("name")
+    if not isinstance(name, str):
+        return False
+    return name == "run" or name.startswith("loop.")
+
+
+def _render_entry_detail(entry: Any) -> str:
+    payload = getattr(entry, "payload", {})
+    if not isinstance(payload, dict):
+        return html.escape(str(payload))
+    if entry.kind == "message":
+        role = payload.get("role", "unknown")
+        content = payload.get("content", "")
+        return f"role={html.escape(str(role))}\n\n{html.escape(str(content))}"
+    return html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _render_log_html(snapshot: ConversationSnapshot, show_system_events: bool = False) -> str:
     context_ids = {entry.id for entry in snapshot.context_entries}
     active_anchor_id = snapshot.active_anchor.entry_id if snapshot.active_anchor else None
     rows: list[str] = []
     for entry in snapshot.entries:
+        if (
+            not show_system_events
+            and getattr(entry, "kind", "") == "event"
+            and _is_system_event(getattr(entry, "payload", {}))
+        ):
+            continue
         is_context = entry.id in context_ids
         is_active_anchor = entry.kind == "anchor" and entry.id == active_anchor_id
         classes = ["tape-entry"]
@@ -71,11 +98,15 @@ def _render_log_html(snapshot: ConversationSnapshot) -> str:
             classes.append("active-anchor")
         badge_label, badge_class = _KIND_BADGE.get(entry.kind, (entry.kind.upper()[:6], "badge-event"))
         summary = html.escape(_summarize_entry_payload(entry.kind, entry.payload))
+        detail = _render_entry_detail(entry)
         rows.append(
-            f"<div class='{' '.join(classes)}' title='Entry #{entry.id}'>"
+            f"<details class='{' '.join(classes)}' title='Entry #{entry.id}'>"
+            "<summary class='entry-summary'>"
             f"<span class='entry-badge {badge_class}'>{badge_label}</span>"
             f"<span class='entry-text'>{summary}</span>"
-            "</div>"
+            "</summary>"
+            f"<pre class='entry-detail'>{detail}</pre>"
+            "</details>"
         )
     if not rows:
         rows.append("<div class='tape-empty'>Tape is empty. Send a message to begin.</div>")
@@ -157,7 +188,7 @@ def _anchor_rows(snapshot: ConversationSnapshot) -> list[list[str]]:
 
 
 def _build_view(
-    view_mode: ViewMode, anchor_name: str | None
+    view_mode: ViewMode, anchor_name: str | None, show_system_events: bool = False
 ) -> tuple[
     list[dict[str, str]],
     str,
@@ -181,7 +212,7 @@ def _build_view(
 
     return (
         snapshot.messages,
-        _render_log_html(snapshot),
+        _render_log_html(snapshot, show_system_events),
         anchor_update,
         _anchor_rows(snapshot),
         _render_tape_footer(snapshot, view_mode),
@@ -194,8 +225,8 @@ def _build_view(
 # ---------------------------------------------------------------------------
 
 
-def _refresh(view_mode: ViewMode, anchor_name: str | None):
-    chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name)
+def _refresh(view_mode: ViewMode, anchor_name: str | None, show_system_events: bool = False):
+    chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name, show_system_events)
     return chat, log, anchor_upd, anchors, footer, ctx, ""
 
 
@@ -208,21 +239,61 @@ def _send_stage1(message: str, chat_history: list[dict[str, str]] | None):
     return "", history, "", text
 
 
-def _send_stage2(pending_message: str, view_mode: ViewMode, anchor_name: str | None):
-    status = ""
+def _send_stage2(
+    pending_message: str,
+    view_mode: ViewMode,
+    anchor_name: str | None,
+    show_system_events: bool,
+):
     text = pending_message.strip()
-    reply = ""
-    if text:
-        reply = get_agent().reply(text, view_mode=view_mode, anchor_name=anchor_name)
-        if reply.startswith("Error:"):
-            status = reply
-    chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name)
-    return chat, log, anchor_upd, anchors, footer, ctx, status, ""
+    if not text:
+        chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name, show_system_events)
+        yield chat, log, anchor_upd, anchors, footer, ctx, "", ""
+        return
+
+    state: dict[str, Any] = {"done": False, "reply": "", "error": None}
+
+    def _worker() -> None:
+        try:
+            state["reply"] = get_agent().reply(text, view_mode=view_mode, anchor_name=anchor_name)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            state["error"] = exc
+        finally:
+            state["done"] = True
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    while not bool(state["done"]):
+        chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name, show_system_events)
+        if not chat or chat[-1].get("role") != "user" or chat[-1].get("content") != text:
+            chat = [*chat, {"role": "user", "content": text}]
+        yield chat, log, anchor_upd, anchors, footer, ctx, "", text
+        time.sleep(0.2)
+
+    reply = str(state.get("reply") or "")
+    if state.get("error") is not None:
+        reply = f"Error: {state['error']}"
+    status = reply if reply.startswith("Error:") else ""
+    chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name, show_system_events)
+    yield chat, log, anchor_upd, anchors, footer, ctx, status, ""
 
 
-def _create_handoff(name: str, phase: str, summary: str, facts_text: str):
+def _send(message: str, view_mode: ViewMode, anchor_name: str | None, show_system_events: bool = False):
+    """Backward-compatible sync wrapper kept for tests."""
+    last = None
+    for update in _send_stage2(message, view_mode, anchor_name, show_system_events):
+        last = update
+    if last is None:
+        chat, log, anchor_upd, anchors, footer, ctx = _build_view(view_mode, anchor_name, show_system_events)
+        return "", chat, log, anchor_upd, anchors, footer, ctx, ""
+    chat, log, anchor_upd, anchors, footer, ctx, status, _pending = last
+    return "", chat, log, anchor_upd, anchors, footer, ctx, status
+
+
+def _create_handoff(name: str, phase: str, summary: str, facts_text: str, show_system_events: bool = False):
     if not name.strip():
-        chat, log, anchor_upd, anchors, footer, ctx = _build_view("latest", None)
+        chat, log, anchor_upd, anchors, footer, ctx = _build_view("latest", None, show_system_events)
         return (
             name,
             phase,
@@ -240,23 +311,34 @@ def _create_handoff(name: str, phase: str, summary: str, facts_text: str):
 
     facts = [line.strip() for line in facts_text.splitlines() if line.strip()]
     normalized = get_agent().handoff(name=name, phase=phase, summary=summary, facts=facts)
-    chat, log, anchor_upd, anchors, footer, ctx = _build_view("latest", None)
+    chat, log, anchor_upd, anchors, footer, ctx = _build_view("latest", None, show_system_events)
     return "", "", "", "", "latest", chat, log, anchor_upd, anchors, footer, ctx, f"Handoff created: {normalized}"
 
 
-def _switch_view(target_mode: ViewMode):
-    chat, log, anchor_upd, anchors, footer, ctx = _build_view(target_mode, None)
+def _switch_view(target_mode: ViewMode, show_system_events: bool = False):
+    chat, log, anchor_upd, anchors, footer, ctx = _build_view(target_mode, None, show_system_events)
     return target_mode, chat, log, anchor_upd, anchors, footer, ctx, ""
 
 
-def _select_anchor_from_table(rows: list[list[str]], evt: gr.SelectData):
+def _select_anchor_from_table(
+    rows: list[list[str]],
+    show_or_evt: bool | gr.SelectData,
+    evt: gr.SelectData | None = None,
+):
+    if evt is None:
+        show_system_events = False
+        if not hasattr(show_or_evt, "index"):
+            return _switch_view("latest", show_system_events)
+        evt = show_or_evt  # type: ignore[assignment]
+    else:
+        show_system_events = bool(show_or_evt)
     row_index = evt.index[0] if isinstance(evt.index, tuple) else evt.index
     if not isinstance(row_index, int) or row_index < 0 or row_index >= len(rows):
-        return _switch_view("latest")
+        return _switch_view("latest", show_system_events)
     anchor_name = rows[row_index][2]
     if not isinstance(anchor_name, str) or not anchor_name.strip():
-        return _switch_view("latest")
-    chat, log, anchor_upd, anchors, footer, ctx = _build_view("from-anchor", anchor_name)
+        return _switch_view("latest", show_system_events)
+    chat, log, anchor_upd, anchors, footer, ctx = _build_view("from-anchor", anchor_name, show_system_events)
     return "from-anchor", chat, log, anchor_upd, anchors, footer, ctx, ""
 
 
@@ -268,10 +350,22 @@ CSS = """
 /* Tape entry list */
 .tape-list { display: flex; flex-direction: column; gap: 4px; max-height: 560px; overflow-y: auto; padding: 2px 0; }
 .tape-entry {
-  display: flex; align-items: center; gap: 8px;
+  display: block;
   padding: 5px 10px; border-radius: 6px;
   border-left: 3px solid transparent;
   transition: background 0.15s;
+}
+.entry-summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.entry-summary::-webkit-details-marker { display: none; }
+.entry-detail {
+  margin: 8px 0 2px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--body-text-color) 4%, transparent);
+  border: 1px solid var(--border-color-primary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .tape-entry:hover { background: color-mix(in srgb, var(--body-text-color) 6%, transparent); }
 .tape-entry.in-context { border-left-color: #2ea043; background: color-mix(in srgb, #2ea043 8%, transparent); }
@@ -331,6 +425,11 @@ with gr.Blocks(title="Endless Context") as demo:
                 value="latest",
                 label="Context view",
             )
+            show_system_events = gr.Checkbox(
+                value=False,
+                label="Show system events",
+                info="Only affects tape rendering; does not affect context selection.",
+            )
             anchor_selector = gr.Dropdown(
                 choices=[],
                 value=None,
@@ -384,13 +483,36 @@ with gr.Blocks(title="Endless Context") as demo:
     # Event wiring — uses .input (not .change) to prevent cascade
     # ------------------------------------------------------------------
 
-    demo.load(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
+    demo.load(
+        fn=_refresh, inputs=[view_mode, anchor_selector, show_system_events], outputs=_core, show_progress="hidden"
+    )
 
     # User manually switches radio / dropdown — .input fires only on direct interaction
-    view_mode.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
-    anchor_selector.input(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
+    view_mode.input(
+        fn=_refresh,
+        inputs=[view_mode, anchor_selector, show_system_events],
+        outputs=_core,
+        show_progress="hidden",
+    )
+    anchor_selector.input(
+        fn=_refresh,
+        inputs=[view_mode, anchor_selector, show_system_events],
+        outputs=_core,
+        show_progress="hidden",
+    )
+    show_system_events.input(
+        fn=_refresh,
+        inputs=[view_mode, anchor_selector, show_system_events],
+        outputs=_core,
+        show_progress="hidden",
+    )
 
-    refresh_button.click(fn=_refresh, inputs=[view_mode, anchor_selector], outputs=_core, show_progress="hidden")
+    refresh_button.click(
+        fn=_refresh,
+        inputs=[view_mode, anchor_selector, show_system_events],
+        outputs=_core,
+        show_progress="hidden",
+    )
 
     send_button.click(
         fn=_send_stage1,
@@ -400,7 +522,7 @@ with gr.Blocks(title="Endless Context") as demo:
         show_progress="hidden",
     ).then(
         fn=_send_stage2,
-        inputs=[pending_message, view_mode, anchor_selector],
+        inputs=[pending_message, view_mode, anchor_selector, show_system_events],
         outputs=_core + [pending_message],
         show_progress="hidden",
     )
@@ -412,23 +534,33 @@ with gr.Blocks(title="Endless Context") as demo:
         show_progress="hidden",
     ).then(
         fn=_send_stage2,
-        inputs=[pending_message, view_mode, anchor_selector],
+        inputs=[pending_message, view_mode, anchor_selector, show_system_events],
         outputs=_core + [pending_message],
         show_progress="hidden",
     )
 
     handoff_button.click(
         fn=_create_handoff,
-        inputs=[handoff_name, handoff_phase, handoff_summary, handoff_facts],
+        inputs=[handoff_name, handoff_phase, handoff_summary, handoff_facts, show_system_events],
         outputs=[handoff_name, handoff_phase, handoff_summary, handoff_facts, view_mode] + _core,
         show_progress="hidden",
     )
 
-    full_tape_button.click(fn=lambda: _switch_view("full"), outputs=[view_mode] + _core, show_progress="hidden")
-    latest_anchor_button.click(fn=lambda: _switch_view("latest"), outputs=[view_mode] + _core, show_progress="hidden")
+    full_tape_button.click(
+        fn=lambda show: _switch_view("full", show),
+        inputs=[show_system_events],
+        outputs=[view_mode] + _core,
+        show_progress="hidden",
+    )
+    latest_anchor_button.click(
+        fn=lambda show: _switch_view("latest", show),
+        inputs=[show_system_events],
+        outputs=[view_mode] + _core,
+        show_progress="hidden",
+    )
     anchors_table.select(
         fn=_select_anchor_from_table,
-        inputs=[anchors_table],
+        inputs=[anchors_table, show_system_events],
         outputs=[view_mode] + _core,
         show_progress="hidden",
     )
