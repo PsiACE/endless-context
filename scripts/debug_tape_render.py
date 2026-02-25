@@ -1,8 +1,8 @@
 #!/usr/bin/env -S uv run python
 """Drive _human_text and _render_structured with real-shaped payloads for alignment."""
+
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -45,11 +45,7 @@ SAMPLES: list[tuple[str, dict]] = [
     ("tool_result", {"results": ["Sunny, 25°C"]}),
     (
         "tool_result",
-        {
-            "results": [
-                {"message": "Tool execution failed.", "kind": "tool", "details": {"error": "Timeout"}}
-            ]
-        },
+        {"results": [{"message": "Tool execution failed.", "kind": "tool", "details": {"error": "Timeout"}}]},
     ),
     ("event", {"name": "loop.step.finish", "data": {"step": 1, "visible_text": True}}),
     ("event", {"name": "command", "data": {"raw": ",tools", "output": "skills.list, ..."}}),
@@ -62,7 +58,8 @@ SAMPLES: list[tuple[str, dict]] = [
 def _strip_html(html: str) -> str:
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&([a-z]+);", lambda m: {"quot": '"', "lt": "<", "gt": ">", "amp": "&"}.get(m.group(1), m.group(0)), text)
+    entities = {"quot": '"', "lt": "<", "gt": ">", "amp": "&"}
+    text = re.sub(r"&([a-z]+);", lambda m: entities.get(m.group(1), m.group(0)), text)
     return " ".join(text.split())
 
 

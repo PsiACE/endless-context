@@ -1,5 +1,6 @@
 #!/usr/bin/env -S uv run python
 """Read tape entries from SeekDB and print sample payloads per kind (for UI alignment)."""
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ if os.path.isfile(".env"):
                 os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def main() -> None:
     from endless_context.tape_store import SeekDBTapeStore

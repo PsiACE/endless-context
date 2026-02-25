@@ -478,8 +478,25 @@ def _select_anchor_from_table(
 # ---------------------------------------------------------------------------
 
 CSS = """
-/* Tape entry list */
-.tape-list { display: flex; flex-direction: column; gap: 4px; max-height: 560px; overflow-y: auto; padding: 2px 0; }
+/* Main row: equal-height columns so tape and conversation bottoms align */
+#main-row { align-items: stretch !important; min-height: 640px; }
+#tape-col, #conversation-col { display: flex !important; flex-direction: column !important; min-height: 0; }
+/* Conversation: chatbot wrapper (3rd child) grows so input+buttons sit at bottom */
+#conversation-col > div:nth-child(3) {
+  flex: 1 1 0 !important; min-height: 0 !important;
+  display: flex !important; flex-direction: column !important;
+}
+#conv-chatbot { flex: 1 1 0 !important; min-height: 400px !important; }
+
+/* Tape entry list (original: fixed max-height, scroll) */
+.tape-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 560px;
+  overflow-y: auto;
+  padding: 2px 0;
+}
 .tape-entry {
   display: block;
   padding: 5px 10px; border-radius: 6px;
@@ -563,9 +580,9 @@ CSS = """
 with gr.Blocks(title="Endless Context") as demo:
     gr.Markdown("## Endless Context\nAppend-only tape &middot; Handoff anchors &middot; Context assembly")
 
-    with gr.Row():
+    with gr.Row(elem_id="main-row"):
         # ---- Left: Tape ----
-        with gr.Column(scale=3):
+        with gr.Column(scale=3, elem_id="tape-col"):
             gr.Markdown("#### Tape")
             view_mode = gr.Radio(
                 choices=["latest", "full", "from-anchor"],
@@ -588,10 +605,10 @@ with gr.Blocks(title="Endless Context") as demo:
             tape_footer = gr.Markdown()
 
         # ---- Center: Conversation ----
-        with gr.Column(scale=6):
+        with gr.Column(scale=6, elem_id="conversation-col"):
             gr.Markdown("#### Conversation")
             context_indicator = gr.HTML()
-            chatbot = gr.Chatbot(height=480, label="Messages")
+            chatbot = gr.Chatbot(height=480, label="Messages", elem_id="conv-chatbot")
             user_input = gr.Textbox(label="Message", placeholder="Type a message and press Enter...", lines=3)
             with gr.Row():
                 send_button = gr.Button("Send", variant="primary")
