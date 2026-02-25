@@ -88,4 +88,15 @@ mysql -h"${db_host}" -P"${db_port}" -u"${db_user}" ${db_pass:+-p${db_pass}} -e "
 
 echo "Database setup complete!"
 
+# Place Bub built-in skill scripts into workspace so tools/skills can spawn them
+uv run --no-dev python /usr/local/bin/setup-bub-workspace.py || true
+
+# Replace skill-installer's install script with project copy (SSL + git fallback)
+if [ -f /app/scripts/install-skill-from-github.py ] && [ -d /app/.agent/skills/skill-installer/scripts ]; then
+  cp /app/scripts/install-skill-from-github.py /app/.agent/skills/skill-installer/scripts/install-skill-from-github.py
+fi
+
+# Project-local skills when agent runs install-skill-from-github.py
+export BUB_SKILLS_HOME="${BUB_SKILLS_HOME:-/app/.agent/skills}"
+
 exec uv run --no-dev python app.py

@@ -477,6 +477,8 @@ def _select_anchor_from_table(
 # CSS (theme-aware, no hardcoded dark-mode colors)
 # ---------------------------------------------------------------------------
 
+# Font: no custom font-family set; Gradio Soft theme uses system/browser default
+# (e.g. PingFang SC / 微软雅黑 on Chinese systems), which can look round (幼圆感).
 CSS = """
 /* Main row: equal-height columns so tape and conversation bottoms align */
 #main-row { align-items: stretch !important; min-height: 640px; }
@@ -609,9 +611,14 @@ with gr.Blocks(title="Endless Context") as demo:
             gr.Markdown("#### Conversation")
             context_indicator = gr.HTML()
             chatbot = gr.Chatbot(height=480, label="Messages", elem_id="conv-chatbot")
-            user_input = gr.Textbox(label="Message", placeholder="Type a message and press Enter...", lines=3)
+            user_input = gr.Textbox(
+                label="Message",
+                placeholder="Type a message, Shift+Enter to send",
+                lines=3,
+                elem_id="user-input",
+            )
             with gr.Row():
-                send_button = gr.Button("Send", variant="primary")
+                send_button = gr.Button("Send", variant="primary", elem_id="send-btn")
                 refresh_button = gr.Button("Refresh", variant="secondary")
 
         # ---- Right: Anchors ----
@@ -729,11 +736,51 @@ with gr.Blocks(title="Endless Context") as demo:
         show_progress="hidden",
     )
 
+# Custom JS: Shift+Enter to send, Enter for newline
+INPUT_HEAD_JS = """
+<script>
+(function() {
+  function attach() {
+    var el = document.getElementById('user-input');
+    if (!el) return false;
+    var textarea = el.querySelector('textarea');
+    if (!textarea || textarea.dataset.ecAttached) return false;
+    textarea.dataset.ecAttached = '1';
+    textarea.addEventListener('keydown', function(e) {
+      if (e.key !== 'Enter') return;
+      if (e.shiftKey) {
+        e.preventDefault();
+        var btn = document.getElementById('send-btn');
+        if (btn) btn.click();
+      } else {
+        e.preventDefault();
+        var start = textarea.selectionStart, end = textarea.selectionEnd;
+        var val = textarea.value;
+        textarea.value = val.slice(0, start) + '\\n' + val.slice(end);
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    return true;
+  }
+  var attempts = 0;
+  function tryAttach() {
+    if (attach() || attempts > 6) return;
+    attempts++;
+    setTimeout(tryAttach, 300);
+  }
+  if (document.readyState === 'complete') tryAttach();
+  else window.addEventListener('load', tryAttach);
+})();
+</script>
+"""
+
 if __name__ == "__main__":
     demo.launch(
         server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         theme=gr.themes.Soft(),
         css=CSS,
+        head=INPUT_HEAD_JS,
         show_error=True,
     )

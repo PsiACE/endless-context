@@ -27,8 +27,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY app.py ./
 COPY src ./src
+COPY scripts ./scripts
 COPY .env.example ./.env.example
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/setup-bub-workspace.py /usr/local/bin/setup-bub-workspace.py
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN uv sync --frozen --python python3.12 --no-dev --default-index "${PIP_INDEX_URL}"

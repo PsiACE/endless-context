@@ -89,6 +89,28 @@ def _patch_republic_tool_history_replay() -> None:
     context_module._ec_tool_history_replay_patched = True
 
 
+def _patch_context_selection_iter() -> None:
+    """Make ContextSelection iterable so bub builtin tape.info can use 'for msg in messages'.
+
+    Republic's read_messages() returns ContextSelection (messages + error), not a list.
+    Bub's tape.info iterates over it; without __iter__ that raises 'ContextSelection' object
+    is not iterable. Other builtins (tape.anchors, tape.search, tape.reset, tape.handoff,
+    skills.list, skills.describe) use list-returning APIs (read_entries, discover_skills,
+    load_skill_body) and work with SeekDB store without this patch.
+    """
+    context_module = importlib.import_module("republic.tape.context")
+    if getattr(context_module.ContextSelection, "_ec_iter_patched", False):
+        return
+
+    _ContextSelection = context_module.ContextSelection
+
+    def ___iter__(self: Any) -> Any:
+        return iter(self.messages)
+
+    _ContextSelection.__iter__ = ___iter__  # type: ignore[method-assign]
+    _ContextSelection._ec_iter_patched = True  # type: ignore[attr-defined]
+
+
 def _resolve_awaitable(value: Any) -> Any:
     if not inspect.isawaitable(value):
         return value
@@ -195,8 +217,17 @@ def build_runtime(
     _patch_bub_store_builder()
     _patch_republic_tool_history_replay()
     _patch_republic_tool_executor()
+    _patch_context_selection_iter()
     settings = load_settings(workspace)
     if not settings.api_base:
+        # Bub Settings use env_prefix BUB_, so LLM_API_BASE in .env is not loaded into api_base.
+        # pydantic-settings does not put .env into os.environ, so we load .env here.
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(workspace / ".env")
+        except ImportError:
+            pass
         llm_api_base = (os.getenv("LLM_API_BASE") or "").strip()
         if llm_api_base:
             settings = settings.model_copy(update={"api_base": llm_api_base})
