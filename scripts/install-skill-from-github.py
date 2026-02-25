@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Install a skill from a GitHub repo. Project copy: SSL-friendly + git fallback for old Git.
+"""Install a skill from a GitHub repo. SSL-friendly + git fallback for old Git.
 
-Same CLI as bub skill-installer so the agent can run: uv run scripts/install-skill-from-github.py --repo owner/repo --path path/to/skill.
+Same CLI as bub skill-installer; agent runs: uv run scripts/install-skill-from-github.py
+--repo owner/repo --path path/to/skill.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,6 +65,7 @@ def _ssl_context():
     ctx = ssl.create_default_context()
     try:
         import certifi
+
         ctx.load_verify_locations(certifi.where())
     except ImportError:
         pass
@@ -157,10 +160,21 @@ def _validate_skill_name(name: str) -> None:
 def _git_sparse_checkout(repo_url: str, ref: str, paths: list[str], dest_dir: str) -> str:
     repo_dir = os.path.join(dest_dir, "repo")
     try:
-        _run_git([
-            "git", "clone", "--filter=blob:none", "--depth", "1",
-            "--sparse", "--single-branch", "--branch", ref, repo_url, repo_dir,
-        ])
+        _run_git(
+            [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                "--depth",
+                "1",
+                "--sparse",
+                "--single-branch",
+                "--branch",
+                ref,
+                repo_url,
+                repo_dir,
+            ]
+        )
         _run_git(["git", "-C", repo_dir, "sparse-checkout", "set", *paths])
         _run_git(["git", "-C", repo_dir, "checkout", ref])
         return repo_dir
@@ -201,7 +215,7 @@ def _prepare_repo(source: Source, method: str, tmp_dir: str) -> str:
     if method in ("download", "auto"):
         try:
             return _download_repo_zip(source.owner, source.repo, source.ref, tmp_dir)
-        except InstallError as exc:
+        except InstallError:
             if method == "download":
                 raise
             # auto: fall back to git on any download error (HTTP, SSL, timeout)

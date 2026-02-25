@@ -8,6 +8,7 @@ run scripts they often use workspace-relative paths. So we copy the **entire**
 builtin skill directories (SKILL.md, scripts/, etc.) into workspace/.agent/skills/
 so they behave as project skills and script paths resolve correctly.
 """
+
 from __future__ import annotations
 
 import os
