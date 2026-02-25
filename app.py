@@ -25,57 +25,185 @@ def get_agent() -> BubAgent:
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
-_KIND_BADGE: dict[str, tuple[str, str]] = {
-    "message": ("MSG", "badge-message"),
-    "anchor": ("ANCHOR", "badge-anchor"),
-    "event": ("EVENT", "badge-event"),
-    "tool_call": ("TOOL", "badge-tool"),
-    "tool_result": ("RESULT", "badge-tool"),
-    "error": ("ERROR", "badge-error"),
-    "system": ("SYS", "badge-event"),
+
+def _kind_label(kind: str) -> str:
+    return kind.upper()[:10]
+
+
+# Unified: one ordered key list per kind for structured view. Unknown kinds use payload keys.
+_ORDERED_KEYS: dict[str, list[str]] = {
+    "message": ["role", "content"],
+    "event": ["name", "data"],
+    "anchor": ["name", "state"],
+    "system": ["content"],
+    "error": ["kind", "message", "details"],
+    "tool_call": ["calls"],
+    "tool_result": ["results"],
 }
 
 
-def _summarize_entry_payload(kind: str, payload: dict[str, Any]) -> str:
-    if kind == "message":
-        role = payload.get("role", "unknown")
-        content = str(payload.get("content", "")).strip().replace("\n", " ")
-        return f"{role}: {content[:120]}"
-    if kind == "anchor":
-        name = str(payload.get("name", ""))
-        state = payload.get("state")
-        if isinstance(state, dict):
-            phase = state.get("phase")
-            if isinstance(phase, str) and phase.strip():
-                return f"{name} ({phase.strip()})"
-        return name
-    if kind == "tool_call":
-        return "tool call"
-    if kind == "tool_result":
-        return "tool result"
-    if kind == "event":
-        return str(payload.get("name", "event"))
-    if kind == "error":
-        return str(payload.get("message", "error"))
-    return str(payload)[:120]
+def _args_summary(arguments: Any, max_values: int = 4, max_len: int = 24) -> str:
+    """Param values from JSON string or dict (for human line); truncated for one-line."""
+    obj: dict[str, Any] | None = None
+    if isinstance(arguments, dict):
+        obj = arguments
+    elif isinstance(arguments, str) and arguments.strip():
+        try:
+            parsed = json.loads(arguments)
+            obj = parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+    if not obj:
+        return ""
+    parts: list[str] = []
+    for v in list(obj.values())[:max_values]:
+        s = str(v).strip().replace("\n", " ")
+        if len(s) > max_len:
+            s = s[: max_len - 1] + "…"
+        parts.append(s)
+    return ", ".join(parts)
 
 
-def _is_system_event(payload: dict[str, Any]) -> bool:
-    name = payload.get("name")
-    if not isinstance(name, str):
-        return False
-    return name == "run" or name.startswith("loop.")
+def _human_text(kind: str, payload: dict[str, Any]) -> str:
+    """One-line summary: same rule set for all kinds (primary line + optional suffix)."""
+    # 1) List-shaped: calls / results
+    calls = payload.get("calls")
+    if isinstance(calls, list) and calls:
+        parts: list[str] = []
+        for call in calls[:3]:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else "?"
+            args_raw = fn.get("arguments") if isinstance(fn, dict) else None
+            ps = _args_summary(args_raw)
+            parts.append(f"{name}({ps})" if ps else f"{name}()")
+        if len(calls) > 3:
+            parts.append("…")
+        return ", ".join(parts) if parts else "tool_call"
+
+    results = payload.get("results")
+    if isinstance(results, list):
+        if not results:
+            return "tool_result (0 results)"
+        first = results[0]
+        if isinstance(first, dict):
+            for k in ("message", "error", "content"):
+                v = first.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()[:90]
+            return f"results: {len(results)} item(s)"
+        if isinstance(first, str) and first.strip():
+            return first.strip()[:90]
+        return f"results: {len(results)} item(s)"
+
+    # 2) Primary line from common fields (same order for all kinds)
+    role = payload.get("role")
+    content = payload.get("content")
+    if isinstance(content, str) and content.strip():
+        prefix = f"{role}: " if isinstance(role, str) and role.strip() else ""
+        return f"{prefix}{content.strip().replace(chr(10), ' ')}"
+
+    for key in ("message", "name", "content"):
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            line = v.strip()[:120]
+            if key == "name" and kind == "event":
+                data = payload.get("data")
+                if isinstance(data, dict) and data:
+                    line += " (" + ", ".join(str(x) for x in list(data.keys())[:3]) + ")"
+                line = "event: " + line
+            elif key == "name" and kind == "anchor":
+                state = payload.get("state")
+                if isinstance(state, dict):
+                    phase = state.get("phase")
+                    if isinstance(phase, str) and phase.strip():
+                        line += f" ({phase.strip()})"
+            return line
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for k in ("message", "error", "name", "status"):
+            v = data.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()[:120]
+
+    compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return compact[:120]
 
 
-def _render_entry_detail(entry: Any) -> str:
-    payload = getattr(entry, "payload", {})
-    if not isinstance(payload, dict):
-        return html.escape(str(payload))
-    if entry.kind == "message":
-        role = payload.get("role", "unknown")
-        content = payload.get("content", "")
-        return f"role={html.escape(str(role))}\n\n{html.escape(str(content))}"
-    return html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
+def _kv_row(key: str, value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        shown = json.dumps(value, ensure_ascii=False, indent=2)
+    else:
+        shown = str(value)
+    return (
+        "<div class='entry-kv'>"
+        f"<span class='entry-k'>{html.escape(str(key))}</span>"
+        f"<span class='entry-v'>{html.escape(shown)}</span>"
+        "</div>"
+    )
+
+
+def _parse_arguments_for_display(arguments: Any) -> Any:
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str) and arguments.strip():
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return arguments
+    return arguments
+
+
+def _structured_value(key: str, value: Any) -> str:
+    """One rule: value is list of dicts → numbered blocks; else kv row."""
+    if not isinstance(value, list):
+        return _kv_row(key, value)
+    blocks: list[str] = []
+    for i, item in enumerate(value):
+        if key == "calls" and isinstance(item, dict):
+            fn = item.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else None
+            args_raw = fn.get("arguments") if isinstance(fn, dict) else None
+            rows = (
+                _kv_row("id", item.get("id"))
+                + _kv_row("name", name)
+                + _kv_row("arguments", _parse_arguments_for_display(args_raw))
+            )
+            blocks.append(
+                f"<div class='entry-call-block'><div class='entry-call-title'>{key} {i + 1}</div>{rows}</div>"
+            )
+        elif isinstance(item, dict):
+            rows = "".join(_kv_row(k, v) for k, v in item.items())
+            blocks.append(
+                f"<div class='entry-result-block'><div class='entry-result-title'>{key} {i + 1}</div>{rows}</div>"
+            )
+        else:
+            blocks.append(
+                "<div class='entry-result-block'>"
+                f"<div class='entry-result-title'>{key} {i + 1}</div>"
+                f"{_kv_row('value', item)}</div>"
+            )
+    return "".join(blocks) if blocks else _kv_row(key, value)
+
+
+def _render_structured(kind: str, payload: dict[str, Any]) -> str:
+    """Unified: ordered keys per kind, then each value via _structured_value (list→blocks, else kv)."""
+    ordered = _ORDERED_KEYS.get(kind, list(payload.keys()))
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in ordered:
+        if key not in payload:
+            continue
+        seen.add(key)
+        out.append(_structured_value(key, payload[key]))
+    for key, value in payload.items():
+        if key not in seen:
+            out.append(_structured_value(key, value))
+    if not out:
+        out.append(_kv_row("payload", "(empty)"))
+    return "<div class='entry-structured'>{}</div>".format("".join(out))
 
 
 def _render_log_html(snapshot: ConversationSnapshot, show_system_events: bool = False) -> str:
@@ -83,11 +211,7 @@ def _render_log_html(snapshot: ConversationSnapshot, show_system_events: bool = 
     active_anchor_id = snapshot.active_anchor.entry_id if snapshot.active_anchor else None
     rows: list[str] = []
     for entry in snapshot.entries:
-        if (
-            not show_system_events
-            and getattr(entry, "kind", "") == "event"
-            and _is_system_event(getattr(entry, "payload", {}))
-        ):
+        if not show_system_events and getattr(entry, "kind", "") == "event":
             continue
         is_context = entry.id in context_ids
         is_active_anchor = entry.kind == "anchor" and entry.id == active_anchor_id
@@ -96,16 +220,23 @@ def _render_log_html(snapshot: ConversationSnapshot, show_system_events: bool = 
             classes.append("in-context")
         if is_active_anchor:
             classes.append("active-anchor")
-        badge_label, badge_class = _KIND_BADGE.get(entry.kind, (entry.kind.upper()[:6], "badge-event"))
-        summary = html.escape(_summarize_entry_payload(entry.kind, entry.payload))
-        detail = _render_entry_detail(entry)
+        payload = getattr(entry, "payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        human = html.escape(_human_text(entry.kind, payload))
+        structured = _render_structured(entry.kind, payload)
+        raw_payload = html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
         rows.append(
             f"<details class='{' '.join(classes)}' title='Entry #{entry.id}'>"
             "<summary class='entry-summary'>"
-            f"<span class='entry-badge {badge_class}'>{badge_label}</span>"
-            f"<span class='entry-text'>{summary}</span>"
+            f"<span class='entry-badge'>{_kind_label(entry.kind)}</span>"
+            f"<span class='entry-text'>{human}</span>"
             "</summary>"
-            f"<pre class='entry-detail'>{detail}</pre>"
+            f"{structured}"
+            "<details class='entry-raw-block'>"
+            "<summary class='entry-raw-summary'>Raw payload</summary>"
+            f"<pre class='entry-raw'>{raw_payload}</pre>"
+            "</details>"
             "</details>"
         )
     if not rows:
@@ -357,16 +488,6 @@ CSS = """
 }
 .entry-summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
 .entry-summary::-webkit-details-marker { display: none; }
-.entry-detail {
-  margin: 8px 0 2px 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--body-text-color) 4%, transparent);
-  border: 1px solid var(--border-color-primary);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .tape-entry:hover { background: color-mix(in srgb, var(--body-text-color) 6%, transparent); }
 .tape-entry.in-context { border-left-color: #2ea043; background: color-mix(in srgb, #2ea043 8%, transparent); }
 .tape-entry.active-anchor { border-left-color: #d29922; background: color-mix(in srgb, #d29922 8%, transparent); }
@@ -376,13 +497,39 @@ CSS = """
 .entry-badge {
   font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
   text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
+  background: color-mix(in srgb, #8b949e 18%, transparent); color: #8b949e;
 }
-.badge-message { background: color-mix(in srgb, #58a6ff 18%, transparent); color: #58a6ff; }
-.badge-anchor  { background: color-mix(in srgb, #d29922 18%, transparent); color: #d29922; }
-.badge-event   { background: color-mix(in srgb, #8b949e 18%, transparent); color: #8b949e; }
-.badge-tool    { background: color-mix(in srgb, #a371f7 18%, transparent); color: #a371f7; }
-.badge-error   { background: color-mix(in srgb, #f85149 18%, transparent); color: #f85149; }
 .entry-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; opacity: 0.85; }
+.entry-structured {
+  margin: 8px 0 6px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--body-text-color) 4%, transparent);
+  border: 1px solid var(--border-color-primary);
+}
+.entry-kv { display: grid; grid-template-columns: 120px 1fr; gap: 8px; padding: 2px 0; font-size: 12px; }
+.entry-k { opacity: 0.65; font-family: monospace; }
+.entry-v { white-space: pre-wrap; word-break: break-word; }
+.entry-call-block, .entry-result-block {
+  margin: 8px 0; padding: 8px; border-radius: 6px;
+  border: 1px solid var(--border-color-primary);
+  background: color-mix(in srgb, var(--body-text-color) 3%, transparent);
+}
+.entry-call-title, .entry-result-title {
+  font-size: 11px; font-weight: 600; opacity: 0.8; margin-bottom: 6px;
+}
+.entry-raw-block { margin: 0 0 2px 0; }
+.entry-raw-summary { cursor: pointer; font-size: 12px; opacity: 0.8; }
+.entry-raw {
+  margin: 6px 0 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color-primary);
+  background: color-mix(in srgb, var(--body-text-color) 2%, transparent);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* Context bar (above chatbot) */
 .ctx-bar { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color-primary); margin-bottom: 6px; }
@@ -427,7 +574,7 @@ with gr.Blocks(title="Endless Context") as demo:
             )
             show_system_events = gr.Checkbox(
                 value=False,
-                label="Show system events",
+                label="Show events",
                 info="Only affects tape rendering; does not affect context selection.",
             )
             anchor_selector = gr.Dropdown(
